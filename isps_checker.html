@@ -1,0 +1,1860 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ISPS Document Checker — Hambantota International Port</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+    rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f4f2ed;
+      --surface: #ffffff;
+      --surface2: #f9f8f5;
+      --border: #e0ddd6;
+      --border2: #cccac2;
+      --text: #1a1916;
+      --text2: #5a5850;
+      --text3: #9a978e;
+      --accent: #1a3a5c;
+      --accent-light: #e8eff6;
+      --accent-text: #1a3a5c;
+      --pass: #1a5c35;
+      --pass-bg: #e8f4ee;
+      --fail: #8b1a1a;
+      --fail-bg: #f4e8e8;
+      --warn: #7a4e0a;
+      --warn-bg: #fdf4e3;
+      --mono: 'IBM Plex Mono', monospace;
+      --sans: 'IBM Plex Sans', sans-serif;
+      --radius: 6px;
+      --radius-lg: 10px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* Layout */
+    .shell {
+      display: flex;
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      width: 220px;
+      background: var(--accent);
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      position: fixed;
+      top: 0;
+      left: 0;
+      height: 100vh;
+      z-index: 100;
+    }
+
+    .sidebar-logo {
+      padding: 20px 18px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .sidebar-logo .port {
+      font-size: 10px;
+      font-family: var(--mono);
+      color: rgba(255, 255, 255, 0.5);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .sidebar-logo .title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #fff;
+      line-height: 1.3;
+    }
+
+    .sidebar-nav {
+      flex: 1;
+      padding: 12px 0;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 18px;
+      font-size: 13px;
+      color: rgba(255, 255, 255, 0.65);
+      cursor: pointer;
+      transition: all 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    .nav-item:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+    }
+
+    .nav-item.active {
+      background: rgba(255, 255, 255, 0.12);
+      color: #fff;
+      border-left-color: #fff;
+    }
+
+    .nav-item svg {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+    }
+
+    .sidebar-footer {
+      padding: 14px 18px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      font-size: 11px;
+      font-family: var(--mono);
+      color: rgba(255, 255, 255, 0.35);
+      line-height: 1.6;
+    }
+
+    .main {
+      margin-left: 220px;
+      flex: 1;
+      padding: 32px 36px;
+      max-width: 960px;
+    }
+
+    .page {
+      display: none;
+    }
+
+    .page.active {
+      display: block;
+    }
+
+    .page-header {
+      margin-bottom: 28px;
+    }
+
+    .page-header h1 {
+      font-size: 22px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+
+    .page-header p {
+      font-size: 13px;
+      color: var(--text2);
+    }
+
+    /* Upload grid */
+    .upload-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .doc-slot {
+      border: 1.5px dashed var(--border2);
+      border-radius: var(--radius-lg);
+      padding: 14px 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+      position: relative;
+      background: var(--surface);
+    }
+
+    .doc-slot:hover {
+      border-color: var(--accent);
+      background: var(--accent-light);
+    }
+
+    .doc-slot.uploaded {
+      border-style: solid;
+      border-color: var(--pass);
+      background: var(--pass-bg);
+    }
+
+    .doc-slot input {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      width: 100%;
+      height: 100%;
+    }
+
+    .doc-slot-icon {
+      font-size: 22px;
+      margin-bottom: 6px;
+    }
+
+    .doc-slot-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 2px;
+    }
+
+    .doc-slot-sub {
+      font-size: 11px;
+      color: var(--text2);
+    }
+
+    .doc-slot.uploaded .doc-slot-label {
+      color: var(--pass);
+    }
+
+    .doc-slot.uploaded .doc-slot-sub {
+      color: var(--pass);
+    }
+
+    /* Buttons */
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 24px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 10px 18px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      border: 1.5px solid transparent;
+      transition: all 0.15s;
+      font-family: var(--sans);
+    }
+
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: #0f2740;
+    }
+
+    .btn-secondary {
+      background: var(--surface);
+      color: var(--text);
+      border-color: var(--border2);
+    }
+
+    .btn-secondary:hover:not(:disabled) {
+      background: var(--surface2);
+      border-color: var(--accent);
+    }
+
+    .btn-success {
+      background: var(--pass);
+      color: #fff;
+      border-color: var(--pass);
+    }
+
+    .btn-success:hover:not(:disabled) {
+      background: #134a2a;
+    }
+
+    .btn-danger {
+      background: var(--fail);
+      color: #fff;
+      border-color: var(--fail);
+    }
+
+    /* Status */
+    .status-box {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 16px 18px;
+      margin-bottom: 20px;
+      display: none;
+    }
+
+    .status-step {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text2);
+      margin-bottom: 6px;
+    }
+
+    .status-step:last-child {
+      margin-bottom: 0;
+    }
+
+    .status-step.done {
+      color: var(--pass);
+    }
+
+    .status-step.active {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .spin {
+      display: inline-block;
+      width: 13px;
+      height: 13px;
+      border: 2px solid var(--border2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    /* Overall badge */
+    .overall-banner {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 18px;
+      border-radius: var(--radius-lg);
+      margin-bottom: 20px;
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .overall-banner.pass {
+      background: var(--pass-bg);
+      color: var(--pass);
+      border: 1.5px solid #a8d4bb;
+    }
+
+    .overall-banner.fail {
+      background: var(--fail-bg);
+      color: var(--fail);
+      border: 1.5px solid #d4a8a8;
+    }
+
+    .overall-banner.warn {
+      background: var(--warn-bg);
+      color: var(--warn);
+      border: 1.5px solid #d4b882;
+    }
+
+    .overall-meta {
+      margin-left: auto;
+      font-size: 12px;
+      font-weight: 400;
+    }
+
+    /* Vessel card */
+    .vessel-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 18px 20px;
+      margin-bottom: 20px;
+    }
+
+    .vessel-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 2px;
+    }
+
+    .vessel-sub {
+      font-size: 12px;
+      color: var(--text2);
+      margin-bottom: 14px;
+      font-family: var(--mono);
+    }
+
+    .vessel-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 12px;
+    }
+
+    .vessel-field label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text3);
+      display: block;
+      margin-bottom: 3px;
+      font-family: var(--mono);
+    }
+
+    .vessel-field span {
+      font-size: 13px;
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    /* Checks */
+    .checks-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 24px;
+    }
+
+    @media (max-width: 600px) {
+      .checks-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .check-item {
+      display: flex;
+      gap: 10px;
+      padding: 11px 13px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface);
+      align-items: flex-start;
+    }
+
+    .check-item.pass {
+      border-color: #a8d4bb;
+      background: var(--pass-bg);
+    }
+
+    .check-item.fail {
+      border-color: #d4a8a8;
+      background: var(--fail-bg);
+    }
+
+    .check-item.warn {
+      border-color: #d4b882;
+      background: var(--warn-bg);
+    }
+
+    .check-icon {
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .check-text strong {
+      font-size: 12px;
+      font-weight: 600;
+      display: block;
+      margin-bottom: 2px;
+      color: var(--text);
+    }
+
+    .check-text span {
+      font-size: 11px;
+      color: var(--text2);
+      line-height: 1.4;
+    }
+
+    .check-item.pass .check-icon {
+      color: var(--pass);
+    }
+
+    .check-item.fail .check-icon {
+      color: var(--fail);
+    }
+
+    .check-item.warn .check-icon {
+      color: var(--warn);
+    }
+
+    /* Flags section */
+    .flags-section {
+      margin-bottom: 24px;
+    }
+
+    .flags-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--fail);
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .flag-item {
+      background: var(--fail-bg);
+      border: 1px solid #d4a8a8;
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      margin-bottom: 8px;
+    }
+
+    .flag-item .flag-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--fail);
+      margin-bottom: 3px;
+    }
+
+    .flag-item .flag-note {
+      font-size: 12px;
+      color: var(--text2);
+    }
+
+    .flag-item.warn-flag {
+      background: var(--warn-bg);
+      border-color: #d4b882;
+    }
+
+    .flag-item.warn-flag .flag-label {
+      color: var(--warn);
+    }
+
+    /* Email preview */
+    .email-preview {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      margin-bottom: 16px;
+      overflow: hidden;
+    }
+
+    .email-header {
+      background: var(--surface2);
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .email-header-left .email-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text3);
+      font-family: var(--mono);
+      margin-bottom: 3px;
+    }
+
+    .email-header-left .email-to {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .email-header-left .email-subject {
+      font-size: 12px;
+      color: var(--text2);
+      margin-top: 2px;
+    }
+
+    .email-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .email-body-area {
+      padding: 16px 18px;
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.8;
+      white-space: pre-wrap;
+      border: none;
+      width: 100%;
+      resize: vertical;
+      min-height: 220px;
+      font-family: var(--sans);
+      background: transparent;
+      outline: none;
+    }
+
+    .email-subject-input {
+      width: 100%;
+      border: none;
+      background: transparent;
+      font-size: 12px;
+      color: var(--text2);
+      font-family: var(--sans);
+      outline: none;
+      margin-top: 2px;
+    }
+
+    /* Custom Rules */
+    .rules-list {
+      margin-bottom: 20px;
+    }
+
+    .rule-item {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .rule-badge {
+      font-size: 10px;
+      font-family: var(--mono);
+      padding: 3px 7px;
+      border-radius: 4px;
+      font-weight: 600;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .rule-badge.mandatory {
+      background: var(--fail-bg);
+      color: var(--fail);
+    }
+
+    .rule-badge.advisory {
+      background: var(--warn-bg);
+      color: var(--warn);
+    }
+
+    .rule-text {
+      flex: 1;
+    }
+
+    .rule-text strong {
+      font-size: 13px;
+      color: var(--text);
+      display: block;
+      margin-bottom: 2px;
+    }
+
+    .rule-text span {
+      font-size: 11px;
+      color: var(--text2);
+    }
+
+    .rule-del {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--text3);
+      padding: 4px;
+      border-radius: 4px;
+    }
+
+    .rule-del:hover {
+      background: var(--fail-bg);
+      color: var(--fail);
+    }
+
+    .add-rule-form {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 18px 20px;
+    }
+
+    .add-rule-form h3 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 14px;
+      color: var(--text);
+    }
+
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .form-group label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text3);
+      font-family: var(--mono);
+    }
+
+    .form-group input,
+    .form-group select,
+    .form-group textarea {
+      border: 1px solid var(--border2);
+      border-radius: var(--radius);
+      padding: 8px 10px;
+      font-size: 13px;
+      font-family: var(--sans);
+      color: var(--text);
+      background: var(--bg);
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .form-group input:focus,
+    .form-group select:focus,
+    .form-group textarea:focus {
+      border-color: var(--accent);
+    }
+
+    .form-group textarea {
+      resize: vertical;
+      min-height: 64px;
+    }
+
+    /* Section titles */
+    .section-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text3);
+      font-family: var(--mono);
+      font-weight: 600;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 24px 0;
+    }
+
+    /* Tabs */
+    .tab-bar {
+      display: flex;
+      gap: 4px;
+      border-bottom: 1.5px solid var(--border);
+      margin-bottom: 20px;
+    }
+
+    .tab {
+      padding: 9px 16px;
+      font-size: 13px;
+      cursor: pointer;
+      color: var(--text2);
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1.5px;
+      transition: all 0.15s;
+      font-weight: 500;
+    }
+
+    .tab:hover {
+      color: var(--text);
+    }
+
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--text);
+      color: #fff;
+      padding: 10px 16px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: all 0.2s;
+      z-index: 9999;
+      pointer-events: none;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .toast.success {
+      background: var(--pass);
+    }
+
+    .toast.error {
+      background: var(--fail);
+    }
+
+    /* API Key banner */
+    .apikey-banner {
+      background: #7a3800;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 10px 18px;
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.85);
+      line-height: 1.5;
+    }
+
+    .apikey-banner strong {
+      display: block;
+      margin-bottom: 4px;
+      color: #fff;
+      font-size: 12px;
+    }
+
+    .apikey-input-row {
+      display: flex;
+      gap: 6px;
+      margin-top: 6px;
+    }
+
+    .apikey-input-row input {
+      flex: 1;
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      border-radius: 4px;
+      padding: 5px 8px;
+      font-size: 11px;
+      font-family: var(--mono);
+      background: rgba(0, 0, 0, 0.25);
+      color: #fff;
+      outline: none;
+    }
+
+    .apikey-input-row input::placeholder {
+      color: rgba(255, 255, 255, 0.35);
+    }
+
+    .apikey-input-row button {
+      background: rgba(255, 255, 255, 0.15);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      border-radius: 4px;
+      color: #fff;
+      font-size: 11px;
+      padding: 5px 10px;
+      cursor: pointer;
+      white-space: nowrap;
+      font-family: var(--sans);
+    }
+
+    .apikey-input-row button:hover {
+      background: rgba(255, 255, 255, 0.25);
+    }
+
+    .apikey-set-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 6px;
+    }
+
+    .apikey-set-row span {
+      font-family: var(--mono);
+      color: rgba(255, 255, 255, 0.6);
+    }
+
+    .apikey-set-row button {
+      background: none;
+      border: none;
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 11px;
+      cursor: pointer;
+      text-decoration: underline;
+      padding: 0;
+      font-family: var(--sans);
+    }
+
+    .apikey-set-row button:hover {
+      color: #fff;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border2);
+      border-radius: 3px;
+    }
+
+    /* Icons inline SVGs */
+    svg.icon {
+      display: inline-block;
+      vertical-align: middle;
+    }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+    // Set PDF.js worker
+    if (typeof pdfjsLib !== 'undefined') {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+  </script>
+</head>
+
+<body>
+
+  <div class="shell">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-logo">
+        <div class="port">Hambantota International Port</div>
+        <div class="title">ISPS Document Checker</div>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-item active" onclick="showPage('checker')">
+          <svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="3" y="3" width="14" height="14" rx="2" />
+            <path d="M7 10l2 2 4-4" />
+          </svg>
+          Check Documents
+        </div>
+        <div class="nav-item" onclick="showPage('emails')">
+          <svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="2" y="5" width="16" height="12" rx="2" />
+            <path d="M2 7l8 5 8-5" />
+          </svg>
+          Review &amp; Send Emails
+        </div>
+        <div class="nav-item" onclick="showPage('rules')">
+          <svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M4 6h12M4 10h8M4 14h5" />
+            <circle cx="15" cy="13" r="3" />
+            <path d="M17.5 15.5l1.5 1.5" />
+          </svg>
+          Custom Rules
+        </div>
+      </nav>
+      <div id="apikeyBanner" class="apikey-banner" style="display:none">
+        <strong>⚠ OpenRouter Key Required</strong>
+        Enter your OpenRouter API key to enable document analysis.
+        <div class="apikey-input-row">
+          <input type="password" id="apikeyInput" placeholder="sk-or-v1-…" autocomplete="off">
+          <button onclick="saveApiKey()">Save</button>
+        </div>
+      </div>
+      <div id="apikeySetBanner" class="apikey-banner"
+        style="display:none;background:rgba(0,0,0,0.25);border-bottom:1px solid rgba(255,255,255,0.08)">
+        <div class="apikey-set-row">
+          <span>🔑 API key set</span>
+          <button onclick="changeApiKey()">Change key</button>
+        </div>
+      </div>
+      <div class="sidebar-footer">
+        PFSO Office<br>
+        pfsohambantota@gmail.com<br>
+        011 3070312
+      </div>
+    </aside>
+
+    <main class="main">
+
+      <!-- ====== PAGE: CHECKER ====== -->
+      <div class="page active" id="page-checker">
+        <div class="page-header">
+          <h1>Document Checker</h1>
+          <p>Upload vessel arrival documents. The AI will check ISPS compliance and flag any discrepancies.</p>
+        </div>
+
+        <div class="section-title">
+          <svg class="icon" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+            stroke-width="2">
+            <path d="M14 2H6a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V4a2 2 0 00-2-2z" />
+            <path d="M8 10h4M8 13h2" />
+          </svg>
+          Upload Vessel Documents
+        </div>
+
+        <div class="upload-grid" id="uploadGrid">
+          <div class="doc-slot" id="slot-pans" onclick="triggerUpload('file-pans')">
+            <input type="file" id="file-pans" accept=".pdf,.doc,.docx" onchange="fileSelected(this,'slot-pans','PANS')">
+            <div class="doc-slot-icon">📋</div>
+            <div class="doc-slot-label">PANS</div>
+            <div class="doc-slot-sub">Pre-Arrival Notification</div>
+          </div>
+          <div class="doc-slot" id="slot-issc" onclick="triggerUpload('file-issc')">
+            <input type="file" id="file-issc" accept=".pdf,.doc,.docx" onchange="fileSelected(this,'slot-issc','ISSC')">
+            <div class="doc-slot-icon">📜</div>
+            <div class="doc-slot-label">ISSC</div>
+            <div class="doc-slot-sub">Ship Security Certificate</div>
+          </div>
+          <div class="doc-slot" id="slot-csr" onclick="triggerUpload('file-csr')">
+            <input type="file" id="file-csr" accept=".pdf,.doc,.docx" onchange="fileSelected(this,'slot-csr','CSR')">
+            <div class="doc-slot-icon">📑</div>
+            <div class="doc-slot-label">CSR</div>
+            <div class="doc-slot-sub">Continuous Synopsis Record</div>
+          </div>
+          <div class="doc-slot" id="slot-dos" onclick="triggerUpload('file-dos')">
+            <input type="file" id="file-dos" accept=".pdf,.doc,.docx" onchange="fileSelected(this,'slot-dos','DoS')">
+            <div class="doc-slot-icon">✍️</div>
+            <div class="doc-slot-label">Declaration of Security</div>
+            <div class="doc-slot-sub">DoS form</div>
+          </div>
+          <div class="doc-slot" id="slot-crew" onclick="triggerUpload('file-crew')">
+            <input type="file" id="file-crew" accept=".pdf,.doc,.docx"
+              onchange="fileSelected(this,'slot-crew','Crew List')">
+            <div class="doc-slot-icon">👥</div>
+            <div class="doc-slot-label">IMO Crew List</div>
+            <div class="doc-slot-sub">FAL Form 5</div>
+          </div>
+          <div class="doc-slot" id="slot-arms" onclick="triggerUpload('file-arms')">
+            <input type="file" id="file-arms" accept=".pdf,.doc,.docx"
+              onchange="fileSelected(this,'slot-arms','Armed Guards')">
+            <div class="doc-slot-icon">🛡️</div>
+            <div class="doc-slot-label">Armed Guards Declaration</div>
+            <div class="doc-slot-sub">Weapons onboard</div>
+          </div>
+          <div class="doc-slot" id="slot-checklist" onclick="triggerUpload('file-checklist')">
+            <input type="file" id="file-checklist" accept=".pdf,.doc,.docx"
+              onchange="fileSelected(this,'slot-checklist','ISPS Checklist')">
+            <div class="doc-slot-icon">☑️</div>
+            <div class="doc-slot-label">ISPS Navy Checklist</div>
+            <div class="doc-slot-sub">HBT port checklist</div>
+          </div>
+        </div>
+
+        <!-- Upload All Files button + hidden multi-input -->
+        <div style="margin-bottom:14px">
+          <input type="file" id="file-all" accept=".pdf,.doc,.docx" multiple style="display:none"
+            onchange="uploadAllFiles(this)">
+          <button class="btn btn-secondary" style="width:100%" onclick="document.getElementById('file-all').click()">
+            <svg class="icon" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+              stroke-width="2">
+              <path d="M4 16v1a1 1 0 001 1h10a1 1 0 001-1v-1M12 8l-4-4-4 4M8 4v10" />
+            </svg>
+            Upload All Files at Once
+          </button>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn btn-primary" id="btnCheck" onclick="runCheck()" disabled>
+            <svg class="icon" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+              stroke-width="2">
+              <circle cx="10" cy="10" r="8" />
+              <path d="M10 6v4l3 3" />
+            </svg>
+            Check Documents
+          </button>
+          <button class="btn btn-secondary" id="btnClear" onclick="clearAll()">
+            <svg class="icon" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+              stroke-width="2">
+              <path d="M4 7h12l-1 9H5L4 7z" />
+              <path d="M2 7h16M8 7V4h4v3" />
+            </svg>
+            Clear All
+          </button>
+        </div>
+
+        <!-- Status -->
+        <div class="status-box" id="statusBox" style="display:none"></div>
+
+        <!-- Results -->
+        <div id="checkResults" style="display:none"></div>
+      </div>
+
+      <!-- ====== PAGE: EMAILS ====== -->
+      <div class="page" id="page-emails">
+        <div class="page-header">
+          <h1>Review &amp; Send Emails</h1>
+          <p>Edit the draft emails below before sending. Both are pre-filled from the document check.</p>
+        </div>
+        <div id="emailsPlaceholder"
+          style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:32px;text-align:center;color:var(--text2);font-size:13px">
+          <div style="font-size:32px;margin-bottom:10px">📭</div>
+          Run a document check first to generate draft emails.
+        </div>
+        <div id="emailsContent" style="display:none">
+          <div class="tab-bar">
+            <div class="tab active" onclick="switchEmailTab('port',this)">Port Authority / Harbour Master</div>
+            <div class="tab" onclick="switchEmailTab('agent',this)">Shipping Agent</div>
+          </div>
+          <div id="email-tab-port">
+            <div class="email-preview">
+              <div class="email-header">
+                <div class="email-header-left">
+                  <div class="email-label">To</div>
+                  <div class="email-to" id="email-port-to">Port Authority / Harbour Master, Hambantota International
+                    Port</div>
+                  <input class="email-subject-input" id="email-port-subject" value="Subject" />
+                </div>
+                <div class="email-actions">
+                  <button class="btn btn-secondary" style="font-size:12px;padding:7px 12px"
+                    onclick="copyEmail('port')">Copy</button>
+                </div>
+              </div>
+              <textarea class="email-body-area" id="email-port-body"
+                placeholder="Email body will appear here..."></textarea>
+            </div>
+            <div class="btn-row">
+              <button class="btn btn-success" onclick="sendEmail('port')">
+                <svg class="icon" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                  stroke-width="2">
+                  <path d="M2 10l16-8-5 16-4-7-7-1z" />
+                </svg>
+                Send to Port Authority
+              </button>
+              <button class="btn btn-secondary" onclick="openMailClient('port')">Open in Mail App</button>
+            </div>
+          </div>
+          <div id="email-tab-agent" style="display:none">
+            <div class="email-preview">
+              <div class="email-header">
+                <div class="email-header-left">
+                  <div class="email-label">To</div>
+                  <div class="email-to" id="email-agent-to">Shipping Agent</div>
+                  <input class="email-subject-input" id="email-agent-subject" value="Subject" />
+                </div>
+                <div class="email-actions">
+                  <button class="btn btn-secondary" style="font-size:12px;padding:7px 12px"
+                    onclick="copyEmail('agent')">Copy</button>
+                </div>
+              </div>
+              <textarea class="email-body-area" id="email-agent-body"
+                placeholder="Email body will appear here..."></textarea>
+            </div>
+            <div class="btn-row">
+              <button class="btn btn-success" onclick="sendEmail('agent')">
+                <svg class="icon" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                  stroke-width="2">
+                  <path d="M2 10l16-8-5 16-4-7-7-1z" />
+                </svg>
+                Send to Shipping Agent
+              </button>
+              <button class="btn btn-secondary" onclick="openMailClient('agent')">Open in Mail App</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ====== PAGE: RULES ====== -->
+      <div class="page" id="page-rules">
+        <div class="page-header">
+          <h1>Custom Rules</h1>
+          <p>Add rules beyond the ISPS Code. These are saved and applied to every document check from any device.</p>
+        </div>
+
+        <div class="section-title">
+          <svg class="icon" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+            stroke-width="2">
+            <path d="M9 17H5a2 2 0 01-2-2V5a2 2 0 012-2h10a2 2 0 012 2v4" />
+            <path d="M12 17l2 2 4-4" />
+          </svg>
+          Built-in ISPS Code Checks (always applied)
+        </div>
+        <div
+          style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:24px">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:var(--text2)">
+            <div>✔ ISSC valid and not expired</div>
+            <div>✔ CSR present and matches ISSC</div>
+            <div>✔ Security level declared (Level 1)</div>
+            <div>✔ Declaration of Security signed by both parties</div>
+            <div>✔ No armed guards or weapons onboard</div>
+            <div>✔ No dangerous goods declared</div>
+            <div>✔ Ship Security Plan onboard and approved</div>
+            <div>✔ Crew list complete (FAL Form 5)</div>
+            <div>✔ No security incidents in last 10 port calls</div>
+            <div>✔ PANS fully completed and signed</div>
+          </div>
+        </div>
+
+        <div class="section-title">
+          <svg class="icon" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+            stroke-width="2">
+            <path d="M12 2l2 2-8 8-3 1 1-3 8-8z" />
+          </svg>
+          Your Custom Rules (<span id="ruleCount">0</span>)
+        </div>
+        <div class="rules-list" id="rulesList">
+          <div style="font-size:13px;color:var(--text3);padding:12px 0" id="noRulesMsg">No custom rules yet. Add one
+            below.</div>
+        </div>
+
+        <div class="add-rule-form">
+          <h3>Add New Rule</h3>
+          <div class="form-row">
+            <div class="form-group" style="grid-column:span 2">
+              <label>Rule Name</label>
+              <input type="text" id="ruleTitle" placeholder="e.g. High-risk flag state — extra scrutiny required"
+                maxlength="120">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group" style="grid-column:span 2">
+              <label>Rule Description (what to look for in the documents)</label>
+              <textarea id="ruleDesc"
+                placeholder="e.g. If the vessel flag state is Iran, North Korea, or any FATF black-listed country, flag as non-compliant and escalate to Commanding Officer before granting entry."
+                rows="3"></textarea>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Severity</label>
+              <select id="ruleSeverity">
+                <option value="mandatory">Mandatory (blocks no-objection)</option>
+                <option value="advisory">Advisory (warning only)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Category</label>
+              <select id="ruleCategory">
+                <option value="flag_state">Flag State</option>
+                <option value="cargo">Cargo</option>
+                <option value="crew">Crew</option>
+                <option value="certificates">Certificates</option>
+                <option value="security">Security Measures</option>
+                <option value="history">Port History</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+          </div>
+          <button class="btn btn-primary" onclick="addRule()">
+            <svg class="icon" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+              stroke-width="2.5">
+              <path d="M10 4v12M4 10h12" />
+            </svg>
+            Save Rule
+          </button>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    // ── State ──────────────────────────────────────────────
+    const uploadedFiles = {};
+    const fileBase64 = {};
+    const fileTexts = {}; // extracted plain text from each PDF
+    let lastResults = null;
+
+    // ── Storage (localStorage for cross-device via same browser; also falls back) ──
+    const RULES_KEY = 'isps_hbt_custom_rules_v2';
+    const SENT_KEY = 'isps_hbt_sent_log_v1';
+
+    function loadRules() {
+      try { return JSON.parse(localStorage.getItem(RULES_KEY) || '[]'); } catch { return []; }
+    }
+    function saveRules(rules) {
+      try { localStorage.setItem(RULES_KEY, JSON.stringify(rules)); } catch { }
+    }
+
+    // ── Navigation ──────────────────────────────────────────
+    function showPage(id) {
+      document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+      document.getElementById('page-' + id).classList.add('active');
+      const items = document.querySelectorAll('.nav-item');
+      const map = { checker: 0, emails: 1, rules: 2 };
+      items[map[id]].classList.add('active');
+      if (id === 'rules') renderRules();
+    }
+
+    // ── PDF text extraction ─────────────────────────────────
+    async function extractTextFromPdf(b64) {
+      try {
+        if (typeof pdfjsLib === 'undefined') return '';
+        const binary = atob(b64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+        let text = '';
+        for (let p = 1; p <= Math.min(pdf.numPages, 30); p++) {
+          const page = await pdf.getPage(p);
+          const content = await page.getTextContent();
+          text += content.items.map(item => item.str).join(' ') + '\n';
+        }
+        return text.trim();
+      } catch (e) {
+        return '';
+      }
+    }
+
+    // ── Upload ──────────────────────────────────────────────
+    function triggerUpload(id) { document.getElementById(id).click(); }
+
+    function fileSelected(input, slotId, label) {
+      const file = input.files[0];
+      if (!file) return;
+      uploadedFiles[slotId] = { file, label };
+      const slot = document.getElementById(slotId);
+      slot.classList.add('uploaded');
+      slot.querySelector('.doc-slot-icon').textContent = '⏳';
+      slot.querySelector('.doc-slot-label').textContent = label + ' (reading…)';
+      slot.querySelector('.doc-slot-sub').textContent = file.name.length > 24 ? file.name.substring(0, 24) + '…' : file.name;
+      const reader = new FileReader();
+      reader.onload = async e => {
+        const b64 = e.target.result.split(',')[1];
+        fileBase64[slotId] = b64;
+        if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+          fileTexts[slotId] = await extractTextFromPdf(b64);
+        } else {
+          fileTexts[slotId] = ''; // .doc files: text extraction not supported in browser
+        }
+        slot.querySelector('.doc-slot-icon').textContent = '✅';
+        slot.querySelector('.doc-slot-label').textContent = label + ' ✓';
+      };
+      reader.readAsDataURL(file);
+      document.getElementById('btnCheck').disabled = false;
+    }
+
+    // ── Upload All Files (auto-assign to slots by filename) ──
+    function uploadAllFiles(input) {
+      const files = Array.from(input.files);
+      if (!files.length) return;
+
+      const SLOT_KEYWORDS = [
+        { id: 'slot-pans', label: 'PANS', keywords: ['pans', 'pre-arrival', 'prearrival', 'arrival notification'] },
+        { id: 'slot-issc', label: 'ISSC', keywords: ['issc', 'security certificate', 'ship security cert'] },
+        { id: 'slot-csr', label: 'CSR', keywords: ['csr', 'synopsis', 'continuous synopsis'] },
+        { id: 'slot-dos', label: 'DoS', keywords: ['dos', 'declaration of security', 'declaration_of_security'] },
+        { id: 'slot-crew', label: 'Crew List', keywords: ['crew', 'fal5', 'fal 5', 'crew list'] },
+        { id: 'slot-arms', label: 'Armed Guards', keywords: ['arm', 'guard', 'weapon', 'armed'] },
+        { id: 'slot-checklist', label: 'ISPS Checklist', keywords: ['checklist', 'check list', 'isps check'] },
+      ];
+
+      const assigned = new Set();
+      const unmatched = [];
+
+      files.forEach(file => {
+        const name = file.name.toLowerCase();
+        let matched = false;
+        for (const slot of SLOT_KEYWORDS) {
+          if (assigned.has(slot.id)) continue;
+          if (slot.keywords.some(kw => name.includes(kw))) {
+            assignFileToSlot(file, slot.id, slot.label);
+            assigned.add(slot.id);
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) unmatched.push(file);
+      });
+
+      // Fill remaining empty slots in order with unmatched files
+      for (const file of unmatched) {
+        for (const slot of SLOT_KEYWORDS) {
+          if (!assigned.has(slot.id) && !uploadedFiles[slot.id]) {
+            assignFileToSlot(file, slot.id, slot.label);
+            assigned.add(slot.id);
+            break;
+          }
+        }
+      }
+
+      if (Object.keys(uploadedFiles).length > 0) {
+        document.getElementById('btnCheck').disabled = false;
+      }
+      // reset so the same set of files can be re-selected
+      input.value = '';
+      showToast(`${files.length} file(s) assigned to document slots`, 'success');
+    }
+
+    function assignFileToSlot(file, slotId, label) {
+      uploadedFiles[slotId] = { file, label };
+      const slot = document.getElementById(slotId);
+      slot.classList.add('uploaded');
+      slot.querySelector('.doc-slot-icon').textContent = '⏳';
+      slot.querySelector('.doc-slot-label').textContent = label + ' (reading…)';
+      slot.querySelector('.doc-slot-sub').textContent = file.name.length > 24 ? file.name.substring(0, 24) + '…' : file.name;
+      const reader = new FileReader();
+      reader.onload = async e => {
+        const b64 = e.target.result.split(',')[1];
+        fileBase64[slotId] = b64;
+        if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+          fileTexts[slotId] = await extractTextFromPdf(b64);
+        } else {
+          fileTexts[slotId] = '';
+        }
+        slot.querySelector('.doc-slot-icon').textContent = '✅';
+        slot.querySelector('.doc-slot-label').textContent = label + ' ✓';
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function clearAll() {
+      Object.keys(uploadedFiles).forEach(k => delete uploadedFiles[k]);
+      Object.keys(fileBase64).forEach(k => delete fileBase64[k]);
+      Object.keys(fileTexts).forEach(k => delete fileTexts[k]);
+      ['slot-pans', 'slot-issc', 'slot-csr', 'slot-dos', 'slot-crew', 'slot-arms', 'slot-checklist'].forEach(id => {
+        const slot = document.getElementById(id);
+        slot.classList.remove('uploaded');
+        const icons = { 'slot-pans': '📋', 'slot-issc': '📜', 'slot-csr': '📑', 'slot-dos': '✍️', 'slot-crew': '👥', 'slot-arms': '🛡️', 'slot-checklist': '☑️' };
+        const labels = { 'slot-pans': 'PANS', 'slot-issc': 'ISSC', 'slot-csr': 'CSR', 'slot-dos': 'Declaration of Security', 'slot-crew': 'IMO Crew List', 'slot-arms': 'Armed Guards Declaration', 'slot-checklist': 'ISPS Navy Checklist' };
+        const subs = { 'slot-pans': 'Pre-Arrival Notification', 'slot-issc': 'Ship Security Certificate', 'slot-csr': 'Continuous Synopsis Record', 'slot-dos': 'DoS form', 'slot-crew': 'FAL Form 5', 'slot-arms': 'Weapons onboard', 'slot-checklist': 'HBT port checklist' };
+        slot.querySelector('.doc-slot-icon').textContent = icons[id];
+        slot.querySelector('.doc-slot-label').textContent = labels[id];
+        slot.querySelector('.doc-slot-sub').textContent = subs[id];
+      });
+      document.getElementById('btnCheck').disabled = true;
+      document.getElementById('checkResults').style.display = 'none';
+      document.getElementById('statusBox').style.display = 'none';
+    }
+
+    // ── Compliance Check ────────────────────────────────────
+    async function runCheck() {
+      const btn = document.getElementById('btnCheck');
+      const statusBox = document.getElementById('statusBox');
+      const resultsDiv = document.getElementById('checkResults');
+      btn.disabled = true;
+      resultsDiv.style.display = 'none';
+      statusBox.style.display = 'block';
+
+      const steps = [
+        { label: 'Reading and extracting document text…', state: 'active' },
+        { label: 'Extracting vessel particulars…', state: '' },
+        { label: 'Checking ISPS compliance…', state: '' },
+        { label: 'Applying custom rules…', state: '' },
+        { label: 'Drafting no-objection emails…', state: '' }
+      ];
+
+      function renderSteps(activeIdx) {
+        statusBox.innerHTML = steps.map((s, i) => {
+          const state = i < activeIdx ? 'done' : i === activeIdx ? 'active' : '';
+          const icon = i < activeIdx
+            ? `<svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="var(--pass)" stroke-width="2.5"><path d="M4 10l4 4 8-8"/></svg>`
+            : i === activeIdx
+              ? `<div class="spin"></div>`
+              : `<div style="width:13px;height:13px;border-radius:50%;border:1.5px solid var(--border2)"></div>`;
+          return `<div class="status-step ${state}">${icon} ${s.label}</div>`;
+        }).join('');
+      }
+
+      const customRules = loadRules();
+      const docLabels = Object.values(uploadedFiles).map(f => f.label).join(', ');
+      const rulesText = customRules.length > 0
+        ? '\n\nCUSTOM RULES (also check these — mandatory rules must block no-objection):\n' +
+        customRules.map((r, i) => `${i + 1}. [${r.severity.toUpperCase()}] ${r.title}: ${r.desc}`).join('\n')
+        : '';
+
+      const systemPrompt = `You are an ISPS compliance expert assistant at Hambantota International Port, Sri Lanka. You analyse vessel arrival documents and return ONLY valid JSON with no markdown, no explanation, nothing else.`;
+
+      const userPrompt = `Documents provided: ${docLabels}.${rulesText}
+
+Analyse ALL provided documents carefully and respond ONLY with this JSON structure (no markdown fences):
+{
+  "vessel": {
+    "name": "...", "imo": "...", "flag": "...", "type": "...",
+    "gross_tonnage": "...", "master": "...", "company": "...",
+    "arrival": "...", "departure": "...", "purpose": "...",
+    "security_level": "...", "agent_name": "...", "agent_email": "...",
+    "agent_phone": "...", "issc_expiry": "...", "issc_issuer": "..."
+  },
+  "checks": [
+    {"id":"issc_valid","label":"ISSC valid and not expired","status":"pass|fail|warn","note":""},
+    {"id":"csr_matches","label":"CSR present and matches ISSC","status":"pass|fail|warn","note":""},
+    {"id":"security_level","label":"Security level declared (Level 1)","status":"pass|fail|warn","note":""},
+    {"id":"dos_signed","label":"Declaration of Security signed by both parties","status":"pass|fail|warn","note":""},
+    {"id":"no_arms","label":"No armed guards or weapons onboard","status":"pass|fail|warn","note":""},
+    {"id":"no_dangerous_cargo","label":"No dangerous goods declared","status":"pass|fail|warn","note":""},
+    {"id":"ssp_onboard","label":"Ship Security Plan onboard and approved","status":"pass|fail|warn","note":""},
+    {"id":"crew_list","label":"Crew list complete (FAL Form 5)","status":"pass|fail|warn","note":""},
+    {"id":"no_incidents","label":"No security incidents in last 10 port calls","status":"pass|fail|warn","note":""},
+    {"id":"pans_complete","label":"PANS fully completed and signed","status":"pass|fail|warn","note":""}
+  ],
+  "custom_checks": [
+    {"label":"Rule name here","status":"pass|fail|warn","note":"Finding from document","severity":"mandatory|advisory"}
+  ],
+  "flags": [
+    {"severity":"fail|warn","label":"Short flag title","detail":"Detailed explanation of the issue and what action is required"}
+  ],
+  "overall": "pass|fail|warn",
+  "summary": "One sentence overall assessment for the PFSO.",
+  "email_port": {
+    "to": "Port Authority / Harbour Master, Hambantota International Port",
+    "subject": "ISPS Security Clearance — MV [Name] IMO [No] — [Date]",
+    "body": "Full formal letter body..."
+  },
+  "email_agent": {
+    "to": "[agent name and email if found in docs]",
+    "subject": "ISPS Security Status — MV [Name]",
+    "body": "Full professional email body..."
+  }
+}
+
+Rules for emails:
+- If overall=pass: email_port is a formal No-Objection Certificate
+- If overall=fail: email_port states what is missing and DOES NOT grant clearance
+- If overall=warn: email_port grants conditional clearance noting the warnings
+- Both emails signed: Port Facility Security Officer (PFSO)\\nInternational Ships & Port Security Office\\nHambantota International Port, Sri Lanka\\nTel: 011 3070312 / 047 2258880\\nEmail: pfsohambantota@gmail.com / pfsohambantota@navy.lk
+- flags array: list EVERY discrepancy found — both from ISPS code and custom rules
+- custom_checks: include one entry per custom rule provided (pass if not applicable or no issue found)`;
+
+      // Build prompt with extracted text embedded inline
+      // Wait for any still-pending extractions, then embed document texts
+      const docTexts = Object.entries(uploadedFiles).map(([slotId, { label }]) => {
+        const text = fileTexts[slotId] || '';
+        if (text) {
+          return `\n\n=== DOCUMENT: ${label} ===\n${text.substring(0, 6000)}`;
+        } else {
+          return `\n\n=== DOCUMENT: ${label} ===\n[File uploaded but text could not be extracted — analyse based on document type and name only]`;
+        }
+      }).join('');
+
+      const fullPrompt = userPrompt + docTexts;
+      const contentParts = [{ type: 'text', text: fullPrompt }];
+
+      renderSteps(0);
+      await sleep(400);
+      renderSteps(1);
+      await sleep(300);
+      renderSteps(2);
+
+      const apiKey = localStorage.getItem('isps_openrouter_key') || '';
+      if (!apiKey) {
+        statusBox.innerHTML = `<div class="status-step" style="color:var(--fail)">No OpenRouter API key set — please enter your key in the sidebar first.</div>`;
+        btn.disabled = false;
+        return;
+      }
+
+      let data;
+      try {
+        const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+            'HTTP-Referer': window.location.href,
+            'X-Title': 'ISPS Document Checker'
+          },
+          body: JSON.stringify({
+            model: 'openrouter/free',
+            max_tokens: 4000,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: contentParts }
+            ]
+          })
+        });
+        if (!resp.ok) {
+          const errJson = await resp.json().catch(() => ({}));
+          const errMsg = errJson.error?.message || `HTTP ${resp.status}`;
+          statusBox.innerHTML = `<div class="status-step" style="color:var(--fail)">API error: ${errMsg}</div>`;
+          btn.disabled = false;
+          return;
+        }
+        data = await resp.json();
+      } catch (e) {
+        statusBox.innerHTML = `<div class="status-step" style="color:var(--fail)">Network error — please check your connection and try again.</div>`;
+        btn.disabled = false;
+        return;
+      }
+
+      renderSteps(3);
+      await sleep(300);
+      renderSteps(4);
+      await sleep(300);
+
+      let parsed;
+      try {
+        // OpenRouter returns OpenAI-compatible response: choices[0].message.content
+        let text = data.choices?.[0]?.message?.content || '';
+        text = text.replace(/```json|```/g, '').trim();
+        const s = text.indexOf('{'), e = text.lastIndexOf('}');
+        if (s !== -1 && e !== -1) text = text.substring(s, e + 1);
+        parsed = JSON.parse(text);
+      } catch (err) {
+        statusBox.innerHTML = `<div class="status-step" style="color:var(--fail)">Could not parse response. Please try again.</div>`;
+        btn.disabled = false;
+        return;
+      }
+
+      lastResults = parsed;
+      statusBox.style.display = 'none';
+      renderResults(parsed);
+      populateEmails(parsed);
+      btn.disabled = false;
+    }
+
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    // ── Render Results ──────────────────────────────────────
+    function renderResults(d) {
+      const v = d.vessel || {};
+      const checks = d.checks || [];
+      const customChecks = d.custom_checks || [];
+      const flags = d.flags || [];
+      const allChecks = [...checks, ...customChecks];
+      const passCount = allChecks.filter(c => c.status === 'pass').length;
+      const failCount = allChecks.filter(c => c.status === 'fail').length;
+      const warnCount = allChecks.filter(c => c.status === 'warn').length;
+
+      const overallClass = d.overall === 'pass' ? 'pass' : d.overall === 'warn' ? 'warn' : 'fail';
+      const overallIcon = d.overall === 'pass' ? '✅' : d.overall === 'warn' ? '⚠️' : '🚫';
+      const overallText = d.overall === 'pass' ? 'All checks passed — No Objection granted' : d.overall === 'warn' ? 'Checks passed with warnings — Conditional clearance' : 'Compliance issues found — No Objection withheld';
+
+      function checkIcon(status) {
+        if (status === 'pass') return `<svg class="check-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10" cy="10" r="8"/><path d="M6.5 10l2.5 2.5 4.5-5"/></svg>`;
+        if (status === 'fail') return `<svg class="check-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10" cy="10" r="8"/><path d="M7 7l6 6M13 7l-6 6"/></svg>`;
+        return `<svg class="check-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 2l8 16H2L10 2z"/><path d="M10 8v4M10 14h.01"/></svg>`;
+      }
+
+      const checksHTML = checks.map(c => `
+    <div class="check-item ${c.status}">
+      ${checkIcon(c.status)}
+      <div class="check-text"><strong>${c.label}</strong><span>${c.note || ''}</span></div>
+    </div>`).join('');
+
+      const customChecksHTML = customChecks.length > 0 ? `
+    <div class="section-title" style="margin-top:20px">Custom Rule Checks</div>
+    <div class="checks-grid">
+      ${customChecks.map(c => `
+        <div class="check-item ${c.status}">
+          ${checkIcon(c.status)}
+          <div class="check-text"><strong>${c.label}</strong><span>${c.note || ''}</span></div>
+        </div>`).join('')}
+    </div>` : '';
+
+      const flagsHTML = flags.length > 0 ? `
+    <div class="flags-section">
+      <div class="flags-title">
+        <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v14M3 3l10 4-10 4"/></svg>
+        ${flags.length} Discrepanc${flags.length > 1 ? 'ies' : 'y'} Flagged
+      </div>
+      ${flags.map(f => `
+        <div class="flag-item ${f.severity === 'warn' ? 'warn-flag' : ''}">
+          <div class="flag-label">${f.severity === 'fail' ? '🚫' : '⚠️'} ${f.label}</div>
+          <div class="flag-note">${f.detail}</div>
+        </div>`).join('')}
+    </div>` : '';
+
+      const div = document.getElementById('checkResults');
+      div.style.display = 'block';
+      div.innerHTML = `
+    <div class="overall-banner ${overallClass}">
+      <span style="font-size:20px">${overallIcon}</span>
+      ${overallText}
+      <span class="overall-meta">${passCount} pass &nbsp;·&nbsp; ${warnCount} warn &nbsp;·&nbsp; ${failCount} fail</span>
+    </div>
+
+    <div class="vessel-card">
+      <div class="vessel-title">MV ${v.name || '—'}</div>
+      <div class="vessel-sub">IMO ${v.imo || '—'} &nbsp;·&nbsp; ${v.flag || '—'} flag &nbsp;·&nbsp; ${v.type || '—'}</div>
+      <div class="vessel-grid">
+        <div class="vessel-field"><label>Master</label><span>${v.master || '—'}</span></div>
+        <div class="vessel-field"><label>Gross Tonnage</label><span>${v.gross_tonnage || '—'}</span></div>
+        <div class="vessel-field"><label>Arrival</label><span>${v.arrival || '—'}</span></div>
+        <div class="vessel-field"><label>Departure</label><span>${v.departure || '—'}</span></div>
+        <div class="vessel-field"><label>Security Level</label><span>${v.security_level || '—'}</span></div>
+        <div class="vessel-field"><label>ISSC Expiry</label><span>${v.issc_expiry || '—'}</span></div>
+        <div class="vessel-field" style="grid-column:span 2"><label>Company</label><span>${v.company || '—'}</span></div>
+        <div class="vessel-field" style="grid-column:span 2"><label>Purpose of Call</label><span>${v.purpose || '—'}</span></div>
+      </div>
+    </div>
+
+    ${flagsHTML}
+
+    <div class="section-title">ISPS Code Compliance Checks</div>
+    <div class="checks-grid">${checksHTML}</div>
+    ${customChecksHTML}
+
+    <hr class="divider">
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn btn-primary" onclick="showPage('emails')">
+        <svg class="icon" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="16" height="12" rx="2"/><path d="M2 7l8 5 8-5"/></svg>
+        Review &amp; Send Emails →
+      </button>
+      <button class="btn btn-secondary" onclick="exportReport()">Export Report</button>
+    </div>
+  `;
+    }
+
+    // ── Email functions ────────────────────────────────────
+    function populateEmails(d) {
+      if (!d) return;
+      const ep = d.email_port || {};
+      const ea = d.email_agent || {};
+      const v = d.vessel || {};
+      document.getElementById('email-port-to').textContent = ep.to || 'Port Authority / Harbour Master, Hambantota International Port';
+      document.getElementById('email-port-subject').value = ep.subject || '';
+      document.getElementById('email-port-body').value = ep.body || '';
+      document.getElementById('email-agent-to').textContent = ea.to || (v.agent_name ? v.agent_name + (v.agent_email ? ' <' + v.agent_email + '>' : '') : 'Shipping Agent');
+      document.getElementById('email-agent-subject').value = ea.subject || '';
+      document.getElementById('email-agent-body').value = ea.body || '';
+      document.getElementById('emailsPlaceholder').style.display = 'none';
+      document.getElementById('emailsContent').style.display = 'block';
+    }
+
+    function switchEmailTab(tab, el) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      el.classList.add('active');
+      document.getElementById('email-tab-port').style.display = tab === 'port' ? 'block' : 'none';
+      document.getElementById('email-tab-agent').style.display = tab === 'agent' ? 'block' : 'none';
+    }
+
+    function copyEmail(which) {
+      const subj = document.getElementById('email-' + which + '-subject').value;
+      const body = document.getElementById('email-' + which + '-body').value;
+      navigator.clipboard.writeText('Subject: ' + subj + '\n\n' + body).then(() => showToast('Copied to clipboard', 'success'));
+    }
+
+    function sendEmail(which) {
+      const to = document.getElementById('email-' + which + '-to').textContent;
+      const subj = document.getElementById('email-' + which + '-subject').value;
+      const body = document.getElementById('email-' + which + '-body').value;
+      const target = which === 'port' ? 'Port Authority' : 'Shipping Agent';
+      // In a real deployment this would call an email API; here we open mailto
+      const emailAddr = which === 'agent' && lastResults && lastResults.vessel && lastResults.vessel.agent_email
+        ? lastResults.vessel.agent_email
+        : (which === 'port' ? 'harbourmaster@hbport.lk' : '');
+      const mailto = `mailto:${emailAddr}?subject=${encodeURIComponent(subj)}&body=${encodeURIComponent(body)}`;
+      window.open(mailto);
+      showToast('Opening mail client for ' + target + '…', 'success');
+      logSent(which, subj);
+    }
+
+    function openMailClient(which) { sendEmail(which); }
+
+    function logSent(which, subject) {
+      try {
+        const log = JSON.parse(localStorage.getItem(SENT_KEY) || '[]');
+        log.unshift({ which, subject, time: new Date().toISOString() });
+        localStorage.setItem(SENT_KEY, JSON.stringify(log.slice(0, 50)));
+      } catch { }
+    }
+
+    // ── Custom Rules ────────────────────────────────────────
+    function renderRules() {
+      const rules = loadRules();
+      const list = document.getElementById('rulesList');
+      const noMsg = document.getElementById('noRulesMsg');
+      document.getElementById('ruleCount').textContent = rules.length;
+
+      if (rules.length === 0) {
+        list.innerHTML = '<div style="font-size:13px;color:var(--text3);padding:12px 0">No custom rules yet. Add one below.</div>';
+        return;
+      }
+      list.innerHTML = rules.map((r, i) => `
+    <div class="rule-item">
+      <span class="rule-badge ${r.severity}">${r.severity}</span>
+      <div class="rule-text">
+        <strong>${r.title}</strong>
+        <span>${r.desc}</span>
+        <div style="font-size:10px;color:var(--text3);margin-top:4px;font-family:var(--mono)">${r.category}</div>
+      </div>
+      <button class="rule-del" onclick="deleteRule(${i})" title="Delete rule">
+        <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h12l-1 9H5L4 7z"/><path d="M2 7h16M8 7V4h4v3"/></svg>
+      </button>
+    </div>`).join('');
+    }
+
+    function addRule() {
+      const title = document.getElementById('ruleTitle').value.trim();
+      const desc = document.getElementById('ruleDesc').value.trim();
+      const severity = document.getElementById('ruleSeverity').value;
+      const category = document.getElementById('ruleCategory').value;
+      if (!title || !desc) { showToast('Please fill in rule name and description', 'error'); return; }
+      const rules = loadRules();
+      rules.push({ title, desc, severity, category, created: new Date().toISOString() });
+      saveRules(rules);
+      document.getElementById('ruleTitle').value = '';
+      document.getElementById('ruleDesc').value = '';
+      renderRules();
+      showToast('Rule saved — will apply to all future checks', 'success');
+    }
+
+    function deleteRule(i) {
+      const rules = loadRules();
+      rules.splice(i, 1);
+      saveRules(rules);
+      renderRules();
+      showToast('Rule deleted', '');
+    }
+
+    // ── Export ──────────────────────────────────────────────
+    function exportReport() {
+      if (!lastResults) return;
+      const d = lastResults;
+      const v = d.vessel || {};
+      const lines = [
+        'ISPS COMPLIANCE REPORT',
+        'Hambantota International Port',
+        'Generated: ' + new Date().toLocaleString(),
+        '',
+        'VESSEL: ' + (v.name || '') + ' | IMO: ' + (v.imo || '') + ' | FLAG: ' + (v.flag || ''),
+        'MASTER: ' + (v.master || '') + ' | ARRIVAL: ' + (v.arrival || ''),
+        'OVERALL STATUS: ' + (d.overall || '').toUpperCase(),
+        '',
+        'COMPLIANCE CHECKS:',
+        ...(d.checks || []).map(c => `  [${c.status.toUpperCase()}] ${c.label} — ${c.note || ''}`),
+        '',
+        'FLAGS / DISCREPANCIES:',
+        ...(d.flags || []).length === 0 ? ['  None'] : (d.flags || []).map(f => `  [${f.severity.toUpperCase()}] ${f.label}: ${f.detail}`),
+        '',
+        'CUSTOM RULE CHECKS:',
+        ...(d.custom_checks || []).length === 0 ? ['  No custom rules applied'] : (d.custom_checks || []).map(c => `  [${c.status.toUpperCase()}] ${c.label} — ${c.note || ''}`),
+      ];
+      const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url;
+      a.download = 'ISPS_Report_' + (v.name || 'vessel').replace(/\s/g, '_') + '_' + new Date().toISOString().slice(0, 10) + '.txt';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // ── Toast ───────────────────────────────────────────────
+    function showToast(msg, type) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = 'toast ' + (type || '');
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2800);
+    }
+
+    // ── API Key management ──────────────────────────────────
+    function saveApiKey() {
+      const val = document.getElementById('apikeyInput').value.trim();
+      if (!val.startsWith('sk-')) { showToast('Invalid key — should start with sk-or-v1-…', 'error'); return; }
+      localStorage.setItem('isps_openrouter_key', val);
+      document.getElementById('apikeyInput').value = '';
+      refreshApiKeyUI();
+      showToast('OpenRouter API key saved', 'success');
+    }
+
+    function changeApiKey() {
+      localStorage.removeItem('isps_openrouter_key');
+      refreshApiKeyUI();
+    }
+
+    function refreshApiKeyUI() {
+      const hasKey = !!localStorage.getItem('isps_openrouter_key');
+      document.getElementById('apikeyBanner').style.display = hasKey ? 'none' : 'block';
+      document.getElementById('apikeySetBanner').style.display = hasKey ? 'block' : 'none';
+    }
+
+    // ── Init ────────────────────────────────────────────────
+    renderRules();
+    refreshApiKeyUI();
+  </script>
+</body>
+
+</html>
