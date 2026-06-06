@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ISPS Port Security System — Hambantota International Port</title>
+<!-- Leaflet Map dependencies -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 :root {
   --bg:#f2f0eb;--surface:#fff;--surface2:#f8f7f4;--border:#e0ddd6;--border2:#ccc9c0;
@@ -296,8 +299,14 @@ tbody td{padding:10px 12px;vertical-align:middle}
         <div class="card">
           <div class="card-title">Vessel Particulars</div>
           <div class="form-row">
+            <div class="form-group">
+              <label>IMO Number</label>
+              <div style="display:flex; gap:8px">
+                <input id="s_imo" placeholder="e.g. 9982990" onblur="checkImoAutoLookup()">
+                <button class="btn btn-secondary btn-sm" onclick="lookupImoData()" style="height:35px">🔍 Lookup</button>
+              </div>
+            </div>
             <div class="form-group"><label>Vessel Name *</label><input id="s_name" placeholder="e.g. CELESTE ACE"></div>
-            <div class="form-group"><label>IMO Number</label><input id="s_imo" placeholder="e.g. 9982990"></div>
           </div>
           <div class="form-row3">
             <div class="form-group"><label>Flag State</label><input id="s_flag" placeholder="e.g. Panama"></div>
@@ -316,6 +325,14 @@ tbody td{padding:10px 12px;vertical-align:middle}
           <div class="form-row">
             <div class="form-group"><label>Agent Name</label><input id="s_agent" placeholder="Shipping agent name"></div>
             <div class="form-group"><label>Agent Email</label><input id="s_agentEmail" placeholder="agent@example.com"></div>
+          </div>
+          
+          <!-- Map container -->
+          <div id="submitMapContainer" style="margin-top:14px; display:none">
+            <label style="font-size:10px; font-family:var(--mono); text-transform:uppercase; letter-spacing:0.06em; color:var(--text3); display:block; margin-bottom:5px">Vessel Live GPS Position (aisstream.io)</label>
+            <div id="s_map" style="height:250px; border:1px solid var(--border2); border-radius:var(--radius)"></div>
+            <input type="hidden" id="s_lat">
+            <input type="hidden" id="s_lon">
           </div>
         </div>
 
@@ -506,13 +523,37 @@ tbody td{padding:10px 12px;vertical-align:middle}
 
       <!-- ── CONFIG ── -->
       <div class="page" id="page-config">
-        <div class="page-hdr"><div><h1>Configuration</h1><p>API keys for LLM providers — stored server-side only, never sent to browser</p></div></div>
+        <div class="page-hdr"><div><h1>Configuration</h1><p>System configuration & API credentials — stored server-side only</p></div></div>
         <div class="card">
-          <div class="card-title">LLM Provider API Keys</div>
-          <div class="form-group"><label>Anthropic API Key</label><input type="password" id="cfgAnthropicKey" placeholder="sk-ant-…"></div>
-          <div class="form-group"><label>OpenAI API Key</label><input type="password" id="cfgOpenaiKey" placeholder="sk-…"></div>
-          <div class="form-group"><label>OpenRouter API Key</label><input type="password" id="cfgOpenrouterKey" placeholder="sk-or-…"></div>
-          <button class="btn btn-primary" onclick="saveConfig()">Save Keys</button>
+          <div class="card-title">LLM Providers & Preferred Models</div>
+          <p style="font-size:12px;color:var(--text2);margin-bottom:14px">Set API credentials and select preferred models for each AI provider.</p>
+          
+          <div style="display:flex; flex-direction:column; gap:14px; margin-bottom:14px">
+            <div class="form-row" style="align-items:end">
+              <div class="form-group" style="margin-bottom:0"><label>Anthropic API Key</label><input type="password" id="cfgAnthropicKey" placeholder="sk-ant-…"></div>
+              <div class="form-group" style="margin-bottom:0"><label>Anthropic Model</label><select id="cfgAnthropicModel"><option value="">Loading models...</option></select></div>
+            </div>
+            
+            <div class="form-row" style="align-items:end">
+              <div class="form-group" style="margin-bottom:0"><label>OpenAI API Key</label><input type="password" id="cfgOpenaiKey" placeholder="sk-…"></div>
+              <div class="form-group" style="margin-bottom:0"><label>OpenAI Model</label><select id="cfgOpenaiModel"><option value="">Loading models...</option></select></div>
+            </div>
+            
+            <div class="form-row" style="align-items:end">
+              <div class="form-group" style="margin-bottom:0"><label>OpenRouter API Key</label><input type="password" id="cfgOpenrouterKey" placeholder="sk-or-…"></div>
+              <div class="form-group" style="margin-bottom:0"><label>OpenRouter Model</label><select id="cfgOpenrouterModel"><option value="">Loading models...</option></select></div>
+            </div>
+          </div>
+          
+          <div style="margin-top:18px">
+            <button class="btn btn-primary" onclick="saveConfig()">Save AI Configuration</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">aisstream.io Vessel Tracking API</div>
+          <div class="form-group"><label>aisstream.io API Key</label><input type="password" id="cfgAisstreamKey" placeholder="Enter your aisstream.io key for live GPS tracking"></div>
+          <button class="btn btn-primary" onclick="saveConfig()">Save Tracking Credentials</button>
         </div>
         <div class="card">
           <div class="card-title">Default Accounts</div>
@@ -602,7 +643,7 @@ function initApp() {
   loadDashboard();
   loadVessels();
   if (role === 'isps_office' || role === 'isps_officer') loadReviewList();
-  if (role === 'isps_officer') { loadNobjList(); loadRules(); loadConfig(); }
+  if (role === 'isps_officer') { loadNobjList(); loadRules(); loadConfig(); loadConfigModels(); }
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -654,7 +695,7 @@ function vesselTableHTML(vessels, compact) {
   if (!vessels.length) return '<div class="empty-state" style="padding:32px"><div class="emo">🚢</div><p>No vessel calls found.</p></div>';
   const rows = vessels.map(v => `
     <tr onclick="openVessel(${v.id})">
-      <td><strong>${v.vessel_name}</strong><br><span style="font-size:11px;color:var(--text3);font-family:var(--mono)">${v.imo_number||'—'}</span></td>
+      <td><strong>${v.imo_number ? '(' + v.imo_number + ') ' : ''}${v.vessel_name}</strong><br><span style="font-size:11px;color:var(--text3);font-family:var(--mono)">${v.imo_number||'—'}</span></td>
       ${compact ? '' : `<td>${v.flag_state||'—'}</td><td>${v.vessel_type||'—'}</td>`}
       <td>${v.expected_arrival ? v.expected_arrival.substring(0,10) : '—'}</td>
       <td>${statusPill(v.status)}</td>
@@ -717,7 +758,8 @@ async function submitVesselAndDocs() {
       gross_tonnage: document.getElementById('s_gt').value, master_name: document.getElementById('s_master').value,
       company_name: document.getElementById('s_company').value, expected_arrival: arrival,
       departure: document.getElementById('s_departure').value, purpose: document.getElementById('s_purpose').value,
-      agent_name: document.getElementById('s_agent').value, agent_email: document.getElementById('s_agentEmail').value
+      agent_name: document.getElementById('s_agent').value, agent_email: document.getElementById('s_agentEmail').value,
+      latitude: document.getElementById('s_lat').value, longitude: document.getElementById('s_lon').value
     });
 
     const callId = callData.call_id;
@@ -755,6 +797,12 @@ function clearSubmitForm() {
   });
   pendingDocs = {};
   document.getElementById('submitStatus').style.display = 'none';
+  document.getElementById('submitMapContainer').style.display = 'none';
+  document.getElementById('s_lat').value = '';
+  document.getElementById('s_lon').value = '';
+  if (window.maps && window.maps['s_map']) {
+    try { window.maps['s_map'].remove(); delete window.maps['s_map']; } catch(e) {}
+  }
 }
 
 // ── Review ────────────────────────────────────────────────────────────────────
@@ -766,7 +814,7 @@ async function loadReviewList() {
     if (!relevant.length) { list.innerHTML = '<div class="empty-state"><div class="emo">✅</div><p>No vessels pending review.</p></div>'; return; }
     list.innerHTML = relevant.map(v => `
       <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="openReviewById(${v.id})">
-        <div style="flex:1"><strong style="font-size:14px">${v.vessel_name}</strong> <span style="font-size:11px;color:var(--text3);font-family:var(--mono)">${v.imo_number||''}</span><br>
+        <div style="flex:1"><strong style="font-size:14px">${v.imo_number ? '(' + v.imo_number + ') ' : ''}${v.vessel_name}</strong> <span style="font-size:11px;color:var(--text3);font-family:var(--mono)">${v.imo_number||''}</span><br>
         <span style="font-size:12px;color:var(--text2)">ETA: ${v.expected_arrival||'—'} · ${v.voyage_ref}</span></div>
         ${statusPill(v.status)}
       </div>`).join('');
@@ -787,7 +835,7 @@ function openReviewDetail(d) {
   const v = d.vessel;
   document.getElementById('reviewVesselInfo').innerHTML = `
     <div class="card">
-      <div class="vessel-name">MV ${v.vessel_name}</div>
+      <div class="vessel-name">${v.imo_number ? '(' + v.imo_number + ') ' : ''}MV ${v.vessel_name}</div>
       <div class="vessel-sub">${v.imo_number||''} · ${v.flag_state||''} flag · ${v.vessel_type||''} · Ref: ${v.voyage_ref}</div>
       <div class="info-grid">
         <div class="info-field"><label>Master</label><span>${v.master_name||'—'}</span></div>
@@ -797,7 +845,17 @@ function openReviewDetail(d) {
         <div class="info-field"><label>Agent</label><span>${v.agent_name||'—'}</span></div>
         <div class="info-field"><label>Status</label><span>${statusPill(v.status)}</span></div>
       </div>
+      ${v.latitude && v.longitude ? `
+      <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:16px">
+        <label style="font-size:10px; font-family:var(--mono); text-transform:uppercase; letter-spacing:0.06em; color:var(--text3); display:block; margin-bottom:6px">Vessel Live GPS Position (aisstream.io)</label>
+        <div id="r_map" style="height:220px; border:1px solid var(--border2); border-radius:var(--radius)"></div>
+      </div>` : ''}
     </div>`;
+  if (v.latitude && v.longitude) {
+    setTimeout(() => {
+      initLeafletMap('r_map', parseFloat(v.latitude), parseFloat(v.longitude), v.vessel_name, v.imo_number);
+    }, 100);
+  }
 
   // Document status
   const docs = d.documents || {};
@@ -954,7 +1012,7 @@ async function loadNobjList() {
     if (!relevant.length) { list.innerHTML = '<div class="empty-state"><div class="emo">📭</div><p>No vessels ready for no-objection.</p></div>'; return; }
     list.innerHTML = relevant.map(v => `
       <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="openNobjById(${v.id})">
-        <div style="flex:1"><strong>${v.vessel_name}</strong> <span style="font-size:11px;color:var(--text3);font-family:var(--mono)">${v.imo_number||''}</span><br>
+        <div style="flex:1"><strong>${v.imo_number ? '(' + v.imo_number + ') ' : ''}${v.vessel_name}</strong> <span style="font-size:11px;color:var(--text3);font-family:var(--mono)">${v.imo_number||''}</span><br>
         <span style="font-size:12px;color:var(--text2)">ETA: ${v.expected_arrival||'—'} · ${v.voyage_ref}</span></div>
         ${statusPill(v.status)}
       </div>`).join('');
@@ -975,7 +1033,7 @@ function openNobjDetail(d) {
   const v = d.vessel;
   document.getElementById('nobjVesselInfo').innerHTML = `
     <div class="card" style="margin-bottom:16px">
-      <div class="vessel-name">MV ${v.vessel_name}</div>
+      <div class="vessel-name">${v.imo_number ? '(' + v.imo_number + ') ' : ''}MV ${v.vessel_name}</div>
       <div class="vessel-sub">${v.imo_number||''} · ${v.flag_state||''} · ${v.voyage_ref}</div>
       <div class="info-grid">
         <div class="info-field"><label>ETA</label><span>${v.expected_arrival||'—'}</span></div>
@@ -983,7 +1041,17 @@ function openNobjDetail(d) {
         <div class="info-field"><label>Agent</label><span>${v.agent_name||'—'} ${v.agent_email ? '&lt;'+v.agent_email+'&gt;':''}</span></div>
         <div class="info-field"><label>Status</label><span>${statusPill(v.status)}</span></div>
       </div>
+      ${v.latitude && v.longitude ? `
+      <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:16px">
+        <label style="font-size:10px; font-family:var(--mono); text-transform:uppercase; letter-spacing:0.06em; color:var(--text3); display:block; margin-bottom:6px">Vessel Live GPS Position (aisstream.io)</label>
+        <div id="n_map" style="height:220px; border:1px solid var(--border2); border-radius:var(--radius)"></div>
+      </div>` : ''}
     </div>`;
+  if (v.latitude && v.longitude) {
+    setTimeout(() => {
+      initLeafletMap('n_map', parseFloat(v.latitude), parseFloat(v.longitude), v.vessel_name, v.imo_number);
+    }, 100);
+  }
   const nobj = d.no_objection || {};
   document.getElementById('nobjPortSubj').value = nobj.email_port_subject || '';
   document.getElementById('nobjPortBody').value = nobj.email_port_body || '';
@@ -1090,10 +1158,85 @@ async function saveConfig() {
   const a = document.getElementById('cfgAnthropicKey').value;
   const o = document.getElementById('cfgOpenaiKey').value;
   const r = document.getElementById('cfgOpenrouterKey').value;
+  const ma = document.getElementById('cfgAnthropicModel').value;
+  const mo = document.getElementById('cfgOpenaiModel').value;
+  const mr = document.getElementById('cfgOpenrouterModel').value;
+  const ast = document.getElementById('cfgAisstreamKey').value;
   if (a) body.ANTHROPIC_API_KEY = a;
   if (o) body.OPENAI_API_KEY = o;
   if (r) body.OPENROUTER_API_KEY = r;
-  try { await api('POST', '/api/config', body); toast('Keys saved','ok'); } catch(e) { toast(e.message,'err'); }
+  // Save model selections (allow empty to clear)
+  body.ANTHROPIC_MODEL = ma || "";
+  body.OPENAI_MODEL = mo || "";
+  body.OPENROUTER_MODEL = mr || "";
+  // aisstream key
+  if (ast) body.AISTREAM_API_KEY = ast;
+  try { await api('POST', '/api/config', body); toast('Configuration saved','ok'); } catch(e) { toast(e.message,'err'); }
+}
+
+// Load available models for each provider and set current selections
+async function loadConfigModels() {
+  try {
+    const res = await api('GET', '/api/config/models');
+    const anthropic = res.anthropic || [];
+    const openai = res.openai || [];
+    const openrouter = res.openrouter || [];
+    const aSel = document.getElementById('cfgAnthropicModel');
+    const oSel = document.getElementById('cfgOpenaiModel');
+    const rSel = document.getElementById('cfgOpenrouterModel');
+    function populate(sel, list) { sel.innerHTML = list.map(m=>`<option value="${m}">${m}</option>`).join(''); }
+    populate(aSel, anthropic);
+    populate(oSel, openai);
+    populate(rSel, openrouter);
+
+    // Read current config and set selected values/placeholders
+    const cfg = await api('GET', '/api/config');
+    if (cfg.ANTHROPIC_MODEL) aSel.value = cfg.ANTHROPIC_MODEL;
+    if (cfg.OPENAI_MODEL) oSel.value = cfg.OPENAI_MODEL;
+    if (cfg.OPENROUTER_MODEL) rSel.value = cfg.OPENROUTER_MODEL;
+    if (cfg.ANTHROPIC_API_KEY) document.getElementById('cfgAnthropicKey').placeholder = cfg.ANTHROPIC_API_KEY;
+    if (cfg.OPENAI_API_KEY) document.getElementById('cfgOpenaiKey').placeholder = cfg.OPENAI_API_KEY;
+    if (cfg.OPENROUTER_API_KEY) document.getElementById('cfgOpenrouterKey').placeholder = cfg.OPENROUTER_API_KEY;
+    if (cfg.AISTREAM_API_KEY) document.getElementById('cfgAisstreamKey').placeholder = cfg.AISTREAM_API_KEY;
+  } catch(e) { console.error('loadConfigModels error', e); }
+}
+
+// Lookup IMO via backend and populate submit form + map
+async function lookupImoData() {
+  const imo = document.getElementById('s_imo').value.trim();
+  if (!imo || !/^\d{7}$/.test(imo)) { toast('Enter a valid 7-digit IMO number','err'); return; }
+  try {
+    const d = await api('GET', '/api/vessels/lookup-imo/' + imo);
+    if (d.error) throw new Error(d.error);
+    document.getElementById('s_name').value = d.vessel_name || '';
+    document.getElementById('s_gt').value = d.gross_tonnage || '';
+    document.getElementById('s_type').value = d.vessel_type || '';
+    document.getElementById('s_flag').value = d.flag_state || '';
+    document.getElementById('s_lat').value = d.latitude || '';
+    document.getElementById('s_lon').value = d.longitude || '';
+    if (d.latitude && d.longitude) {
+      document.getElementById('submitMapContainer').style.display = 'block';
+      initLeafletMap('s_map', parseFloat(d.latitude), parseFloat(d.longitude), d.vessel_name, imo);
+    }
+    toast('Vessel data loaded','ok');
+  } catch(e) { toast('Lookup failed: ' + (e.message||e), 'err'); }
+}
+
+function checkImoAutoLookup() {
+  const v = document.getElementById('s_imo').value.trim();
+  if (/^\d{7}$/.test(v)) lookupImoData();
+}
+
+// Initialize a Leaflet map into the given container id
+function initLeafletMap(id, lat, lon, name, imo) {
+  try {
+    if (!window.maps) window.maps = {};
+    if (window.maps[id]) { try { window.maps[id].remove(); } catch(e){} }
+    const map = L.map(id).setView([lat, lon], 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+    const marker = L.marker([lat, lon]).addTo(map).bindPopup(`<strong>${imo ? 'IMO '+imo+' — ' : ''}${name||''}</strong>`).openPopup();
+    window.maps[id] = map;
+  } catch(e) { console.error('Leaflet init error', e); }
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────

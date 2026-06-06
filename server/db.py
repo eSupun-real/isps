@@ -58,6 +58,8 @@ def init_db():
         purpose         TEXT,
         security_level  TEXT    DEFAULT 'LEVEL 1',
         berth           TEXT,
+        latitude        TEXT,
+        longitude       TEXT,
         status          TEXT    DEFAULT 'pending'
                             CHECK(status IN ('pending','documents_submitted','under_review',
                                              'discrepancies_raised','documents_corrected',
@@ -66,6 +68,16 @@ def init_db():
         created_at      TEXT    DEFAULT (datetime('now')),
         updated_at      TEXT    DEFAULT (datetime('now'))
     )""")
+
+    # Ensure latitude and longitude columns exist in case table was already created
+    try:
+        c.execute("ALTER TABLE vessel_calls ADD COLUMN latitude TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE vessel_calls ADD COLUMN longitude TEXT")
+    except sqlite3.OperationalError:
+        pass
 
     # ── Documents — one row per document type per vessel call ─────────────────
     # Each doc type has: file stored path, extracted text, LLM-extracted fields,
@@ -163,9 +175,9 @@ def init_db():
             c.execute("INSERT INTO users(username,password_hash,role,full_name,email,phone,company) VALUES(?,?,?,?,?,?,?)",
                       (uname, h, role, fname, email, phone, company))
         conn.commit()
-        print("✓ Default users seeded")
+        print("[OK] Default users seeded")
 
-    print(f"✓ Database initialised at {DB_PATH}")
+    print(f"[OK] Database initialised at {DB_PATH}")
     conn.close()
 
 if __name__ == "__main__":

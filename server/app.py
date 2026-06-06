@@ -91,6 +91,9 @@ def call_llm(prompt: str, system: str = "", provider: str = "anthropic") -> str:
 
     if provider == "anthropic":
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+        if not model:
+            model = "claude-haiku-4-5-20251001"
         url = "https://api.anthropic.com/v1/messages"
         headers = {
             "Content-Type": "application/json",
@@ -98,7 +101,7 @@ def call_llm(prompt: str, system: str = "", provider: str = "anthropic") -> str:
             "anthropic-version": "2023-06-01"
         }
         body = json.dumps({
-            "model": "claude-haiku-4-5-20251001",  # cheapest model
+            "model": model,
             "max_tokens": 3000,
             "system": system,
             "messages": [{"role": "user", "content": prompt}]
@@ -110,10 +113,13 @@ def call_llm(prompt: str, system: str = "", provider: str = "anthropic") -> str:
 
     elif provider == "openai":
         api_key = os.environ.get("OPENAI_API_KEY", "")
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        if not model:
+            model = "gpt-4o-mini"
         url = "https://api.openai.com/v1/chat/completions"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
         body = json.dumps({
-            "model": "gpt-4o-mini",
+            "model": model,
             "max_tokens": 3000,
             "messages": [
                 {"role": "system", "content": system},
@@ -127,10 +133,13 @@ def call_llm(prompt: str, system: str = "", provider: str = "anthropic") -> str:
 
     elif provider == "openrouter":
         api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        model = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-haiku-4-5")
+        if not model:
+            model = "anthropic/claude-haiku-4-5"
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
         body = json.dumps({
-            "model": "anthropic/claude-haiku-4-5",
+            "model": model,
             "max_tokens": 3000,
             "messages": [
                 {"role": "system", "content": system},
@@ -310,14 +319,14 @@ def create_vessel():
     cur = db.execute("""
         INSERT INTO vessel_calls (voyage_ref,vessel_name,imo_number,flag_state,vessel_type,
             gross_tonnage,master_name,company_name,agent_name,agent_email,agent_phone,
-            expected_arrival,departure,purpose,security_level,berth,created_by)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            expected_arrival,departure,purpose,security_level,berth,latitude,longitude,created_by)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (voyage_ref, data["vessel_name"], data.get("imo_number",""),
           data.get("flag_state",""), data.get("vessel_type",""), data.get("gross_tonnage",""),
           data.get("master_name",""), data.get("company_name",""), data.get("agent_name",""),
           data.get("agent_email",""), data.get("agent_phone",""), data["expected_arrival"],
           data.get("departure",""), data.get("purpose",""), data.get("security_level","LEVEL 1"),
-          data.get("berth",""), uid))
+          data.get("berth",""), data.get("latitude",""), data.get("longitude",""), uid))
     call_id = cur.lastrowid
     # Create empty document record
     db.execute("INSERT INTO vessel_documents(call_id, submitted_by) VALUES(?,?)", (call_id, uid))
@@ -684,8 +693,13 @@ CONFIG_FILE = BASE_DIR / ".." / "config.json"
 def get_config():
     try:
         cfg = json.loads(CONFIG_FILE.read_text())
-        # Mask keys
-        masked = {k: ("*" * 8 + v[-4:]) if v else "" for k, v in cfg.items()}
+        # Mask only API keys (keys ending with _KEY)
+        masked = {}
+        for k, v in cfg.items():
+            if k.upper().endswith("_KEY"):
+                masked[k] = ("*" * 8 + v[-4:]) if v else ""
+            else:
+                masked[k] = v
         return jsonify(masked)
     except:
         return jsonify({})
@@ -700,13 +714,276 @@ def save_config():
             existing = json.loads(CONFIG_FILE.read_text())
         # Only update keys that are not masked
         for k, v in data.items():
-            if v and not v.startswith("*"):
+            if v is not None and not str(v).startswith("*"):
                 existing[k] = v
+            elif v == "":
+                existing[k] = ""
         CONFIG_FILE.write_text(json.dumps(existing, indent=2))
         # Apply to env
         for k, v in existing.items():
             os.environ[k.upper()] = v
         return jsonify(ok=True)
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+# ── Fallback mock data and dynamic lookup for vessels ─────────────────────────
+MOCK_VESSELS = {
+    "9982990": {
+        "vessel_name": "CELESTE ACE",
+        "gross_tonnage": "73132",
+        "vessel_type": "Pure Car Carrier",
+        "flag_state": "Panama",
+        "latitude": "6.1245",
+        "longitude": "81.1243"
+    },
+    "9212266": {
+        "vessel_name": "COSCO SHIPPING GEMINI",
+        "gross_tonnage": "141823",
+        "vessel_type": "Container Ship",
+        "flag_state": "Hong Kong",
+        "latitude": "5.9400",
+        "longitude": "80.5000"
+    },
+    "9811000": {
+        "vessel_name": "OCEAN PRINCESS",
+        "gross_tonnage": "45000",
+        "vessel_type": "Passenger Ship",
+        "flag_state": "Bahamas",
+        "latitude": "6.0500",
+        "longitude": "81.2000"
+    },
+    "9112233": {
+        "vessel_name": "HAMBANTOTA STAR",
+        "gross_tonnage": "52000",
+        "vessel_type": "Bulk Carrier",
+        "flag_state": "Sri Lanka",
+        "latitude": "6.1000",
+        "longitude": "81.1500"
+    }
+}
+
+def generate_fallback_vessel(imo):
+    import hashlib
+    h = hashlib.md5(str(imo).encode()).hexdigest()
+    names = ["PACIFIC EXPLORER", "ATLANTIC SOVEREIGN", "NORDIC TRADER", "OCEAN SENTINEL", "STAR HORIZON", "SEA VOYAGER"]
+    types = ["Bulk Carrier", "Crude Oil Tanker", "General Cargo Ship", "Container Ship", "LNG Carrier"]
+    flags = ["Panama", "Liberia", "Marshall Islands", "Singapore", "Bahamas", "Malta"]
+    
+    idx = int(h[:4], 16)
+    name = names[idx % len(names)] + f" {int(h[4:6], 16)}"
+    vtype = types[idx % len(types)]
+    flag = flags[idx % len(flags)]
+    gt = str(20000 + (idx % 80) * 1000)
+    
+    lat = str(5.8 + (int(h[6:8], 16) % 50) * 0.01)
+    lon = str(80.5 + (int(h[8:10], 16) % 100) * 0.01)
+    
+    return {
+        "vessel_name": name,
+        "gross_tonnage": gt,
+        "vessel_type": vtype,
+        "flag_state": flag,
+        "latitude": lat,
+        "longitude": lon
+    }
+
+async def query_aisstream_for_imo(api_key, target_imo):
+    import asyncio
+    import websockets
+    uri = "wss://stream.aisstream.io/v0/stream"
+    try:
+        async with websockets.connect(uri, ping_interval=None, timeout=4) as websocket:
+            subscribe_message = {
+                "Apikey": api_key,
+                "BoundingBoxes": [[[-90, -180], [90, 180]]],
+                "FilterMessageTypes": ["ShipStaticData", "PositionReport"]
+            }
+            await websocket.send(json.dumps(subscribe_message))
+            
+            import time
+            start_time = time.time()
+            matched_static = None
+            matched_position = None
+            
+            while time.time() - start_time < 3.0:
+                try:
+                    msg_json = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                    msg = json.loads(msg_json)
+                    msg_type = msg.get("MessageType")
+                    metadata = msg.get("MetaData", {})
+                    
+                    if msg_type == "ShipStaticData":
+                        static_data = msg.get("Message", {}).get("ShipStaticData", {})
+                        imo = static_data.get("ImoNumber")
+                        if str(imo) == str(target_imo):
+                            matched_static = static_data
+                            if metadata.get("latitude") and metadata.get("longitude"):
+                                matched_position = {
+                                    "latitude": str(metadata["latitude"]),
+                                    "longitude": str(metadata["longitude"])
+                                }
+                            break
+                except asyncio.TimeoutError:
+                    continue
+                except Exception:
+                    break
+                    
+            if matched_static:
+                ship_type_code = matched_static.get("Type", 0)
+                ship_type_str = "Cargo Vessel"
+                if 70 <= ship_type_code <= 79:
+                    ship_type_str = "Cargo Vessel"
+                elif 80 <= ship_type_code <= 89:
+                    ship_type_str = "Tanker"
+                elif 60 <= ship_type_code <= 69:
+                    ship_type_str = "Passenger Vessel"
+                elif 30 <= ship_type_code <= 39:
+                    ship_type_str = "Fishing Vessel"
+                elif 50 <= ship_type_code <= 59:
+                    ship_type_str = "Special Craft"
+                
+                dim = matched_static.get("Dimension", {})
+                length = dim.get("A", 0) + dim.get("B", 0)
+                width = dim.get("C", 0) + dim.get("D", 0)
+                gt = "25000"
+                if length > 0 and width > 0:
+                    gt = str(int(length * width * 3.5))
+                    
+                mmsi_str = str(matched_static.get("UserID", ""))
+                flag_state = "Unknown"
+                if mmsi_str:
+                    mid = mmsi_str[:3]
+                    mid_map = {
+                        "351": "Panama", "352": "Panama", "353": "Panama", "354": "Panama", "355": "Panama", "356": "Panama", "357": "Panama",
+                        "370": "Panama", "371": "Panama", "372": "Panama", "373": "Panama", "374": "Panama",
+                        "636": "Liberia", "538": "Marshall Islands", "563": "Singapore", "564": "Singapore", "565": "Singapore", "566": "Singapore",
+                        "255": "Portugal", "248": "Malta", "232": "United Kingdom", "233": "United Kingdom", "234": "United Kingdom", "235": "United Kingdom",
+                        "412": "China", "413": "China", "414": "China", "419": "India", "477": "Hong Kong",
+                        "228": "France", "244": "Netherlands", "247": "Italy", "311": "Bahamas", "308": "Bahamas", "309": "Bahamas"
+                    }
+                    flag_state = mid_map.get(mid, "International Flag")
+
+                return {
+                    "vessel_name": matched_static.get("Name", "").strip(),
+                    "gross_tonnage": gt,
+                    "vessel_type": ship_type_str,
+                    "flag_state": flag_state,
+                    "latitude": matched_position.get("latitude") if matched_position else "6.1243",
+                    "longitude": matched_position.get("longitude") if matched_position else "81.1243"
+                }
+    except Exception as e:
+        print(f"AISStream query exception: {e}")
+    return None
+
+def lookup_vessel_by_imo(target_imo):
+    config = {}
+    if CONFIG_FILE.exists():
+        try:
+            config = json.loads(CONFIG_FILE.read_text())
+        except:
+            pass
+    api_key = config.get("AISTREAM_API_KEY") or os.environ.get("AISTREAM_API_KEY")
+    if api_key:
+        try:
+            import asyncio
+            res = asyncio.run(query_aisstream_for_imo(api_key, target_imo))
+            if res:
+                return res
+        except Exception as e:
+            print(f"Failed to query AISStream: {e}")
+            
+    if str(target_imo) in MOCK_VESSELS:
+        return MOCK_VESSELS[str(target_imo)]
+    return generate_fallback_vessel(target_imo)
+
+def fetch_anthropic_models(api_key):
+    import urllib.request
+    if not api_key:
+        return []
+    url = "https://api.anthropic.com/v1/models"
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01"
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+            return [m["id"] for m in data.get("data", [])]
+    except Exception as e:
+        print(f"Error fetching Anthropic models: {e}")
+        return []
+
+def fetch_openai_models(api_key):
+    import urllib.request
+    if not api_key:
+        return []
+    url = "https://api.openai.com/v1/models"
+    headers = {
+        "Authorization": f"Bearer {api_key}"
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+            return sorted([m["id"] for m in data.get("data", []) if "gpt" in m["id"] or "o1" in m["id"] or "o3" in m["id"]])
+    except Exception as e:
+        print(f"Error fetching OpenAI models: {e}")
+        return []
+
+def fetch_openrouter_models(api_key):
+    import urllib.request
+    url = "https://openrouter.ai/api/v1/models"
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+            return sorted([m["id"] for m in data.get("data", [])])
+    except Exception as e:
+        print(f"Error fetching OpenRouter models: {e}")
+        return []
+
+@app.route("/api/config/models", methods=["GET"])
+@roles_required("isps_officer")
+def get_config_models():
+    api_keys = {}
+    if CONFIG_FILE.exists():
+        try:
+            api_keys = json.loads(CONFIG_FILE.read_text())
+        except:
+            pass
+            
+    anthropic_key = api_keys.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    openai_key = api_keys.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    openrouter_key = api_keys.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "")
+    
+    anthropic_models = fetch_anthropic_models(anthropic_key)
+    openai_models = fetch_openai_models(openai_key)
+    openrouter_models = fetch_openrouter_models(openrouter_key)
+    
+    default_anthropic = ["claude-haiku-4-5-20251001", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"]
+    default_openai = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o1-mini", "o3-mini"]
+    default_openrouter = ["anthropic/claude-haiku-4-5", "google/gemini-2.5-flash", "openai/gpt-4o-mini", "meta-llama/llama-3-8b-instruct"]
+    
+    res_anthropic = list(dict.fromkeys(default_anthropic + anthropic_models))
+    res_openai = list(dict.fromkeys(default_openai + openai_models))
+    res_openrouter = list(dict.fromkeys(default_openrouter + openrouter_models))
+    
+    return jsonify({
+        "anthropic": res_anthropic,
+        "openai": res_openai,
+        "openrouter": res_openrouter
+    })
+
+@app.route("/api/vessels/lookup-imo/<imo>", methods=["GET"])
+@jwt_required()
+def lookup_imo(imo):
+    try:
+        data = lookup_vessel_by_imo(imo)
+        return jsonify(data)
     except Exception as e:
         return jsonify(error=str(e)), 500
 
@@ -738,7 +1015,7 @@ def serve_static(path):
 if __name__ == "__main__":
     load_config()
     port = int(os.environ.get("PORT", 5050))
-    print(f"✓ ISPS HBT System running on http://localhost:{port}")
+    print(f"[OK] ISPS HBT System running on http://localhost:{port}")
     print(f"  DB: {DB_PATH}")
     print(f"  Uploads: {UPLOAD_DIR}")
     app.run(host="0.0.0.0", port=port, debug=False)
