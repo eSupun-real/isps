@@ -1,0 +1,744 @@
+"""
+app.py — ISPS HBT Port Security Management System — Flask Backend
+"""
+
+import os
+import sys
+import json
+import base64
+import subprocess
+import uuid
+from datetime import datetime, timedelta, timezone
+from functools import wraps
+from pathlib import Path
+
+from flask import Flask, request, jsonify, send_from_directory, send_file
+from flask_cors import CORS
+from flask_jwt_extended import (
+    JWTManager, create_access_token, jwt_required,
+    get_jwt_identity, get_jwt
+)
+import bcrypt
+import sqlite3
+
+# ── Config ────────────────────────────────────────────────────────────────────
+BASE_DIR   = Path(__file__).parent
+PROJECT_DIR = BASE_DIR.parent
+DB_PATH    = os.environ.get("DB_PATH", str(PROJECT_DIR / "isps_hbt.db"))
+UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", str(BASE_DIR / ".." / "uploads")))
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+JWT_SECRET = os.environ.get("JWT_SECRET", "isps-hbt-secret-change-in-production-2024")
+
+app = Flask(__name__, static_folder="../client", static_url_path="")
+CORS(app, origins="*", supports_credentials=True)
+app.config["JWT_SECRET_KEY"] = JWT_SECRET
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=12)
+jwt = JWTManager(app)
+
+# ── DB helpers ────────────────────────────────────────────────────────────────
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+def row_to_dict(row):
+    if row is None: return None
+    return dict(row)
+
+def rows_to_list(rows):
+    return [dict(r) for r in rows]
+
+def log_action(conn, call_id, user_id, action, detail=""):
+    conn.execute(
+        "INSERT INTO activity_log(call_id,user_id,action,detail) VALUES(?,?,?,?)",
+        (call_id, user_id, action, detail)
+    )
+
+# ── Role decorator ────────────────────────────────────────────────────────────
+def roles_required(*roles):
+    def decorator(fn):
+        @wraps(fn)
+        @jwt_required()
+        def wrapper(*args, **kwargs):
+            claims = get_jwt()
+            if claims.get("role") not in roles:
+                return jsonify(error="Insufficient permissions"), 403
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+# ── OCR extraction (calls Python subprocess) ─────────────────────────────────
+def run_ocr(b64: str, filename: str) -> dict:
+    script = str(BASE_DIR / "ocr_extract.py")
+    inp = json.dumps({"b64": b64, "filename": filename})
+    try:
+        result = subprocess.run(
+            [sys.executable, script],
+            input=inp, capture_output=True, text=True, timeout=120
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return json.loads(result.stdout)
+        return {"text": "", "method": "error", "char_count": 0}
+    except Exception as e:
+        return {"text": "", "method": "error", "error": str(e), "char_count": 0}
+
+# ── LLM call (multi-provider) ─────────────────────────────────────────────────
+def call_llm(prompt: str, system: str = "", provider: str = "anthropic") -> str:
+    """Minimal LLM call — only used for compliance analysis, not OCR."""
+    import urllib.request
+
+    if provider == "anthropic":
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        url = "https://api.anthropic.com/v1/messages"
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01"
+        }
+        body = json.dumps({
+            "model": "claude-haiku-4-5-20251001",  # cheapest model
+            "max_tokens": 3000,
+            "system": system,
+            "messages": [{"role": "user", "content": prompt}]
+        }).encode()
+        req = urllib.request.Request(url, data=body, headers=headers)
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+            return data["content"][0]["text"]
+
+    elif provider == "openai":
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+        body = json.dumps({
+            "model": "gpt-4o-mini",
+            "max_tokens": 3000,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt}
+            ]
+        }).encode()
+        req = urllib.request.Request(url, data=body, headers=headers)
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+            return data["choices"][0]["message"]["content"]
+
+    elif provider == "openrouter":
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+        body = json.dumps({
+            "model": "anthropic/claude-haiku-4-5",
+            "max_tokens": 3000,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt}
+            ]
+        }).encode()
+        req = urllib.request.Request(url, data=body, headers=headers)
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+            return data["choices"][0]["message"]["content"]
+
+    return ""
+
+# ── Build compliance prompt from extracted text ───────────────────────────────
+def build_compliance_prompt(texts: dict, custom_rules: list, vessel_name: str) -> tuple:
+    system = (
+        "You are an ISPS compliance expert at Hambantota International Port, Sri Lanka. "
+        "Analyse vessel security documents and return ONLY valid JSON — no markdown, no explanation."
+    )
+
+    # Concatenate all extracted texts (already done locally via OCR — no file sent to LLM)
+    doc_sections = []
+    for doc_type, text in texts.items():
+        if text and text.strip():
+            snippet = text[:3000]  # cap per doc to reduce tokens
+            doc_sections.append(f"=== {doc_type.upper()} ===\n{snippet}")
+
+    docs_text = "\n\n".join(doc_sections) if doc_sections else "No document text available."
+
+    rules_text = ""
+    if custom_rules:
+        rules_text = "\n\nCUSTOM PORT RULES (mandatory rules must block clearance):\n"
+        for i, r in enumerate(custom_rules, 1):
+            rules_text += f"{i}. [{r['severity'].upper()}] {r['title']}: {r['description']}\n"
+
+    prompt = f"""
+Vessel: {vessel_name}
+
+DOCUMENT EXTRACTS (OCR-processed locally):
+{docs_text}
+{rules_text}
+
+Return ONLY this JSON:
+{{
+  "vessel": {{
+    "name": "", "imo": "", "flag": "", "type": "", "gross_tonnage": "",
+    "master": "", "company": "", "arrival": "", "departure": "",
+    "purpose": "", "security_level": "", "issc_expiry": "", "issc_issuer": "",
+    "agent_name": "", "agent_email": "", "agent_phone": ""
+  }},
+  "checks": [
+    {{"id":"issc_valid","label":"ISSC valid and not expired","status":"pass|fail|warn","note":""}},
+    {{"id":"csr_matches","label":"CSR present and matches ISSC","status":"pass|fail|warn","note":""}},
+    {{"id":"security_level","label":"Security level declared (Level 1)","status":"pass|fail|warn","note":""}},
+    {{"id":"dos_signed","label":"Declaration of Security signed by both parties","status":"pass|fail|warn","note":""}},
+    {{"id":"no_arms","label":"No armed guards or weapons onboard","status":"pass|fail|warn","note":""}},
+    {{"id":"no_dangerous_cargo","label":"No dangerous goods declared","status":"pass|fail|warn","note":""}},
+    {{"id":"ssp_onboard","label":"Ship Security Plan onboard and approved","status":"pass|fail|warn","note":""}},
+    {{"id":"crew_list","label":"Crew list complete (FAL Form 5)","status":"pass|fail|warn","note":""}},
+    {{"id":"no_incidents","label":"No security incidents in last 10 port calls","status":"pass|fail|warn","note":""}},
+    {{"id":"pans_complete","label":"PANS fully completed and signed","status":"pass|fail|warn","note":""}}
+  ],
+  "custom_checks": [{{"label":"","status":"pass|fail|warn","note":"","severity":"mandatory|advisory"}}],
+  "flags": [{{"severity":"fail|warn","label":"","detail":""}}],
+  "overall": "pass|fail|warn",
+  "summary": "One sentence assessment.",
+  "email_port": {{
+    "to": "Port Authority / Harbour Master, Hambantota International Port",
+    "subject": "",
+    "body": ""
+  }},
+  "email_agent": {{
+    "to": "",
+    "subject": "",
+    "body": ""
+  }},
+  "doc_findings": {{
+    "pans": {{"status":"pass|fail|warn","issues":""}},
+    "issc": {{"status":"pass|fail|warn","issues":""}},
+    "csr": {{"status":"pass|fail|warn","issues":""}},
+    "dos": {{"status":"pass|fail|warn","issues":""}},
+    "crew_list": {{"status":"pass|fail|warn","issues":""}},
+    "armed_guards": {{"status":"pass|fail|warn","issues":""}},
+    "isps_checklist": {{"status":"pass|fail|warn","issues":""}}
+  }}
+}}
+
+Email signature for both emails:
+Port Facility Security Officer (PFSO)
+International Ships & Port Security Office
+Hambantota International Port, Sri Lanka
+Tel: 011 3070312 / 047 2258880
+Email: pfsohambantota@gmail.com / pfsohambantota@navy.lk
+
+If overall=pass → email_port is a No-Objection Certificate.
+If overall=fail → email_port does NOT grant clearance; lists what is missing.
+If overall=warn → email_port grants conditional clearance noting warnings.
+flags[] must list EVERY discrepancy found.
+"""
+    return system, prompt
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AUTH ROUTES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/auth/login", methods=["POST"])
+def login():
+    data = request.json or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
+    if not username or not password:
+        return jsonify(error="Username and password required"), 400
+
+    db = get_db()
+    user = row_to_dict(db.execute(
+        "SELECT * FROM users WHERE username=? AND is_active=1", (username,)
+    ).fetchone())
+    db.close()
+
+    if not user or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+        return jsonify(error="Invalid credentials"), 401
+
+    token = create_access_token(
+        identity=str(user["id"]),
+        additional_claims={"role": user["role"], "username": user["username"], "name": user["full_name"]}
+    )
+    return jsonify(
+        token=token,
+        user={k: user[k] for k in ("id","username","role","full_name","email","company")}
+    )
+
+@app.route("/api/auth/me", methods=["GET"])
+@jwt_required()
+def me():
+    uid = int(get_jwt_identity())
+    db = get_db()
+    user = row_to_dict(db.execute("SELECT id,username,role,full_name,email,phone,company FROM users WHERE id=?", (uid,)).fetchone())
+    db.close()
+    return jsonify(user)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VESSEL CALLS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/vessels", methods=["GET"])
+@jwt_required()
+def list_vessels():
+    claims = get_jwt()
+    role = claims["role"]
+    uid = int(get_jwt_identity())
+    db = get_db()
+
+    if role == "agent":
+        # Agents see only their own submissions
+        rows = rows_to_list(db.execute(
+            "SELECT * FROM vessel_calls WHERE created_by=? ORDER BY expected_arrival DESC", (uid,)
+        ).fetchall())
+    else:
+        rows = rows_to_list(db.execute(
+            "SELECT * FROM vessel_calls ORDER BY expected_arrival DESC"
+        ).fetchall())
+    db.close()
+    return jsonify(rows)
+
+@app.route("/api/vessels", methods=["POST"])
+@jwt_required()
+def create_vessel():
+    uid = int(get_jwt_identity())
+    data = request.json or {}
+    required = ["vessel_name", "expected_arrival"]
+    for f in required:
+        if not data.get(f):
+            return jsonify(error=f"{f} is required"), 400
+
+    voyage_ref = f"HBT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    db = get_db()
+    cur = db.execute("""
+        INSERT INTO vessel_calls (voyage_ref,vessel_name,imo_number,flag_state,vessel_type,
+            gross_tonnage,master_name,company_name,agent_name,agent_email,agent_phone,
+            expected_arrival,departure,purpose,security_level,berth,created_by)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (voyage_ref, data["vessel_name"], data.get("imo_number",""),
+          data.get("flag_state",""), data.get("vessel_type",""), data.get("gross_tonnage",""),
+          data.get("master_name",""), data.get("company_name",""), data.get("agent_name",""),
+          data.get("agent_email",""), data.get("agent_phone",""), data["expected_arrival"],
+          data.get("departure",""), data.get("purpose",""), data.get("security_level","LEVEL 1"),
+          data.get("berth",""), uid))
+    call_id = cur.lastrowid
+    # Create empty document record
+    db.execute("INSERT INTO vessel_documents(call_id, submitted_by) VALUES(?,?)", (call_id, uid))
+    log_action(db, call_id, uid, "vessel_created", f"Voyage ref: {voyage_ref}")
+    db.commit()
+    db.close()
+    return jsonify(voyage_ref=voyage_ref, call_id=call_id), 201
+
+@app.route("/api/vessels/<int:call_id>", methods=["GET"])
+@jwt_required()
+def get_vessel(call_id):
+    db = get_db()
+    vessel = row_to_dict(db.execute("SELECT * FROM vessel_calls WHERE id=?", (call_id,)).fetchone())
+    if not vessel:
+        db.close()
+        return jsonify(error="Not found"), 404
+    docs = row_to_dict(db.execute("SELECT * FROM vessel_documents WHERE call_id=?", (call_id,)).fetchone())
+    nobj = row_to_dict(db.execute("SELECT * FROM no_objections WHERE call_id=? ORDER BY issued_at DESC LIMIT 1", (call_id,)).fetchone())
+    logs = rows_to_list(db.execute(
+        "SELECT l.*,u.full_name FROM activity_log l LEFT JOIN users u ON l.user_id=u.id WHERE l.call_id=? ORDER BY l.created_at DESC",
+        (call_id,)
+    ).fetchall())
+    db.close()
+    return jsonify(vessel=vessel, documents=docs, no_objection=nobj, activity=logs)
+
+@app.route("/api/vessels/<int:call_id>/status", methods=["PATCH"])
+@roles_required("isps_officer","isps_office")
+def update_status(call_id):
+    uid = int(get_jwt_identity())
+    data = request.json or {}
+    status = data.get("status")
+    if not status:
+        return jsonify(error="status required"), 400
+    db = get_db()
+    db.execute("UPDATE vessel_calls SET status=?,updated_at=datetime('now') WHERE id=?", (status, call_id))
+    log_action(db, call_id, uid, "status_updated", status)
+    db.commit()
+    db.close()
+    return jsonify(ok=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DOCUMENT UPLOAD & OCR
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/vessels/<int:call_id>/documents", methods=["POST"])
+@jwt_required()
+def upload_documents(call_id):
+    """
+    Accepts JSON: { docs: [{ doc_type, filename, b64 }] }
+    Runs local OCR on each file — NO LLM call here.
+    """
+    uid = int(get_jwt_identity())
+    data = request.json or {}
+    docs = data.get("docs", [])
+    if not docs:
+        return jsonify(error="No documents provided"), 400
+
+    db = get_db()
+    vessel = row_to_dict(db.execute("SELECT * FROM vessel_calls WHERE id=?", (call_id,)).fetchone())
+    if not vessel:
+        db.close()
+        return jsonify(error="Vessel call not found"), 404
+
+    # Ensure doc record exists
+    doc_rec = row_to_dict(db.execute("SELECT * FROM vessel_documents WHERE call_id=?", (call_id,)).fetchone())
+    if not doc_rec:
+        db.execute("INSERT INTO vessel_documents(call_id,submitted_by) VALUES(?,?)", (call_id, uid))
+        db.commit()
+
+    results = {}
+    for doc in docs:
+        doc_type = doc.get("doc_type", "other").lower().replace(" ","_")
+        filename  = doc.get("filename", "file.pdf")
+        b64       = doc.get("b64", "")
+        if not b64:
+            continue
+
+        # Save file to disk
+        ext = Path(filename).suffix
+        save_name = f"{call_id}_{doc_type}_{uuid.uuid4().hex[:8]}{ext}"
+        save_path = UPLOAD_DIR / save_name
+        with open(save_path, "wb") as f:
+            f.write(base64.b64decode(b64))
+
+        # Run OCR locally
+        ocr_result = run_ocr(b64, filename)
+        text = ocr_result.get("text", "")
+        method = ocr_result.get("method", "unknown")
+
+        # Update DB columns
+        safe_type = doc_type if doc_type in [
+            "pans","issc","csr","dos","crew_list","armed_guards","isps_checklist",
+            "pi_certificate","hull_machinery","fal6","fal7","ship_particulars","other"
+        ] else "other"
+
+        db.execute(f"""
+            UPDATE vessel_documents
+            SET doc_{safe_type}_path=?,
+                doc_{safe_type}_text=?,
+                doc_{safe_type}_received=1,
+                updated_at=datetime('now')
+            WHERE call_id=?
+        """, (str(save_path), text, call_id))
+
+        results[doc_type] = {"method": method, "chars": len(text), "saved": save_name}
+
+    # Update vessel status
+    db.execute("UPDATE vessel_calls SET status='documents_submitted',updated_at=datetime('now') WHERE id=?", (call_id,))
+    log_action(db, call_id, uid, "documents_uploaded", json.dumps(list(results.keys())))
+    db.commit()
+    db.close()
+    return jsonify(ok=True, ocr_results=results)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMPLIANCE ANALYSIS (LLM — called explicitly by ISPS office)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/vessels/<int:call_id>/analyse", methods=["POST"])
+@roles_required("isps_officer","isps_office")
+def analyse_vessel(call_id):
+    """
+    Runs LLM compliance analysis on already-OCR'd text.
+    LLM receives only extracted text, NOT the binary files → cost saving.
+    """
+    uid = int(get_jwt_identity())
+    data = request.json or {}
+    provider = data.get("provider", "anthropic")
+
+    db = get_db()
+    vessel = row_to_dict(db.execute("SELECT * FROM vessel_calls WHERE id=?", (call_id,)).fetchone())
+    doc_rec = row_to_dict(db.execute("SELECT * FROM vessel_documents WHERE call_id=?", (call_id,)).fetchone())
+    if not vessel or not doc_rec:
+        db.close()
+        return jsonify(error="Not found"), 404
+
+    custom_rules = rows_to_list(db.execute(
+        "SELECT title,description,severity,category FROM custom_rules WHERE is_active=1"
+    ).fetchall())
+
+    # Collect OCR'd texts
+    doc_types = ["pans","issc","csr","dos","crew_list","armed_guards","isps_checklist",
+                 "pi_certificate","hull_machinery","fal6","fal7","ship_particulars","other"]
+    texts = {}
+    for dt in doc_types:
+        t = doc_rec.get(f"doc_{dt}_text") or ""
+        if t.strip():
+            texts[dt] = t
+
+    system, prompt = build_compliance_prompt(texts, custom_rules, vessel["vessel_name"])
+
+    try:
+        raw = call_llm(prompt, system, provider)
+    except Exception as e:
+        db.close()
+        return jsonify(error=f"LLM error: {str(e)}"), 500
+
+    # Parse JSON from LLM response
+    parsed = None
+    try:
+        clean = raw.replace("```json","").replace("```","").strip()
+        s = clean.index("{"); e2 = clean.rindex("}")
+        parsed = json.loads(clean[s:e2+1])
+    except Exception:
+        db.close()
+        return jsonify(error="LLM returned invalid JSON", raw=raw[:500]), 500
+
+    # Update vessel fields from LLM extraction
+    v = parsed.get("vessel", {})
+    update_fields = []
+    update_vals = []
+    field_map = {
+        "imo_number":"imo","flag_state":"flag","vessel_type":"type",
+        "gross_tonnage":"gross_tonnage","master_name":"master","company_name":"company",
+        "agent_name":"agent_name","agent_email":"agent_email","agent_phone":"agent_phone",
+        "departure":"departure","purpose":"purpose","security_level":"security_level"
+    }
+    for db_col, json_key in field_map.items():
+        val = v.get(json_key,"")
+        if val:
+            update_fields.append(f"{db_col}=?")
+            update_vals.append(val)
+    if update_fields:
+        update_vals.append(call_id)
+        db.execute(f"UPDATE vessel_calls SET {','.join(update_fields)},updated_at=datetime('now') WHERE id=?", update_vals)
+
+    # Update doc discrepancies per-document
+    doc_findings = parsed.get("doc_findings", {})
+    for dt in doc_types:
+        finding = doc_findings.get(dt, {})
+        status = finding.get("status", "pass")
+        issues = finding.get("issues", "")
+        disc_flag = 1 if status in ("fail","warn") else 0
+        db.execute(f"""
+            UPDATE vessel_documents
+            SET doc_{dt}_discrepancy=?, doc_{dt}_disc_detail=?
+            WHERE call_id=?
+        """, (disc_flag, issues, call_id))
+
+    # Save full compliance result
+    overall = parsed.get("overall","pass")
+    db.execute("""
+        UPDATE vessel_documents
+        SET compliance_json=?, overall_result=?, llm_status='done', updated_at=datetime('now')
+        WHERE call_id=?
+    """, (json.dumps(parsed), overall, call_id))
+
+    new_status = "cleared" if overall == "pass" else "discrepancies_raised"
+    db.execute("UPDATE vessel_calls SET status=?,updated_at=datetime('now') WHERE id=?", (new_status, call_id))
+
+    # Pre-fill email drafts in no_objections table
+    ep = parsed.get("email_port", {})
+    ea = parsed.get("email_agent", {})
+    existing_no = db.execute("SELECT id FROM no_objections WHERE call_id=?", (call_id,)).fetchone()
+    if existing_no:
+        db.execute("""
+            UPDATE no_objections SET email_port_subject=?,email_port_body=?,
+            email_agent_subject=?,email_agent_body=? WHERE call_id=?
+        """, (ep.get("subject",""), ep.get("body",""), ea.get("subject",""), ea.get("body",""), call_id))
+    else:
+        db.execute("""
+            INSERT INTO no_objections(call_id,issued_by,email_port_subject,email_port_body,email_agent_subject,email_agent_body)
+            VALUES(?,?,?,?,?,?)
+        """, (call_id, uid, ep.get("subject",""), ep.get("body",""), ea.get("subject",""), ea.get("body","")))
+
+    log_action(db, call_id, uid, "compliance_analysed", f"Overall: {overall} | Provider: {provider}")
+    db.commit()
+    db.close()
+    return jsonify(result=parsed, overall=overall)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DISCREPANCIES & CORRECTIVE ACTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/vessels/<int:call_id>/discrepancy", methods=["PATCH"])
+@roles_required("isps_officer","isps_office")
+def update_discrepancy(call_id):
+    uid = int(get_jwt_identity())
+    data = request.json or {}
+    doc_type = data.get("doc_type","").lower().replace(" ","_")
+    disc_detail = data.get("disc_detail","")
+    corrective = data.get("corrective_action","")
+    disc_flag = 1 if data.get("has_discrepancy", True) else 0
+
+    db = get_db()
+    db.execute(f"""
+        UPDATE vessel_documents
+        SET doc_{doc_type}_discrepancy=?,
+            doc_{doc_type}_disc_detail=?,
+            doc_{doc_type}_corrective=?,
+            updated_at=datetime('now')
+        WHERE call_id=?
+    """, (disc_flag, disc_detail, corrective, call_id))
+    db.execute("UPDATE vessel_calls SET status='discrepancies_raised',updated_at=datetime('now') WHERE id=?", (call_id,))
+    log_action(db, call_id, uid, "discrepancy_updated", f"{doc_type}: {disc_detail[:80]}")
+    db.commit()
+    db.close()
+    return jsonify(ok=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NO OBJECTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/vessels/<int:call_id>/no-objection", methods=["GET"])
+@jwt_required()
+def get_no_objection(call_id):
+    db = get_db()
+    nobj = row_to_dict(db.execute(
+        "SELECT * FROM no_objections WHERE call_id=? ORDER BY issued_at DESC LIMIT 1", (call_id,)
+    ).fetchone())
+    db.close()
+    return jsonify(nobj)
+
+@app.route("/api/vessels/<int:call_id>/no-objection", methods=["PUT"])
+@roles_required("isps_officer")
+def update_no_objection(call_id):
+    uid = int(get_jwt_identity())
+    data = request.json or {}
+    db = get_db()
+    existing = db.execute("SELECT id FROM no_objections WHERE call_id=?", (call_id,)).fetchone()
+    if existing:
+        db.execute("""
+            UPDATE no_objections
+            SET email_port_subject=?, email_port_body=?,
+                email_agent_subject=?, email_agent_body=?, notes=?
+            WHERE call_id=?
+        """, (data.get("email_port_subject",""), data.get("email_port_body",""),
+              data.get("email_agent_subject",""), data.get("email_agent_body",""),
+              data.get("notes",""), call_id))
+    else:
+        db.execute("""
+            INSERT INTO no_objections(call_id,issued_by,email_port_subject,email_port_body,email_agent_subject,email_agent_body,notes)
+            VALUES(?,?,?,?,?,?,?)
+        """, (call_id, uid, data.get("email_port_subject",""), data.get("email_port_body",""),
+              data.get("email_agent_subject",""), data.get("email_agent_body",""), data.get("notes","")))
+    db.commit()
+    db.close()
+    return jsonify(ok=True)
+
+@app.route("/api/vessels/<int:call_id>/no-objection/send", methods=["POST"])
+@roles_required("isps_officer")
+def send_no_objection(call_id):
+    uid = int(get_jwt_identity())
+    data = request.json or {}
+    target = data.get("target","port")  # "port" or "agent"
+    db = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    if target == "port":
+        db.execute("UPDATE no_objections SET email_port_sent=1,email_port_sent_at=? WHERE call_id=?", (now, call_id))
+    else:
+        db.execute("UPDATE no_objections SET email_agent_sent=1,email_agent_sent_at=? WHERE call_id=?", (now, call_id))
+
+    db.execute("UPDATE vessel_calls SET status='no_objection_issued',updated_at=datetime('now') WHERE id=?", (call_id,))
+    log_action(db, call_id, uid, "no_objection_sent", f"Target: {target}")
+    db.commit()
+    db.close()
+    return jsonify(ok=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CUSTOM RULES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/rules", methods=["GET"])
+@jwt_required()
+def get_rules():
+    db = get_db()
+    rules = rows_to_list(db.execute("SELECT * FROM custom_rules WHERE is_active=1 ORDER BY id DESC").fetchall())
+    db.close()
+    return jsonify(rules)
+
+@app.route("/api/rules", methods=["POST"])
+@roles_required("isps_officer","isps_office")
+def add_rule():
+    uid = int(get_jwt_identity())
+    data = request.json or {}
+    if not data.get("title") or not data.get("description"):
+        return jsonify(error="title and description required"), 400
+    db = get_db()
+    db.execute("""
+        INSERT INTO custom_rules(title,description,severity,category,created_by)
+        VALUES(?,?,?,?,?)
+    """, (data["title"], data["description"], data.get("severity","advisory"), data.get("category","other"), uid))
+    db.commit()
+    rules = rows_to_list(db.execute("SELECT * FROM custom_rules WHERE is_active=1 ORDER BY id DESC").fetchall())
+    db.close()
+    return jsonify(rules), 201
+
+@app.route("/api/rules/<int:rule_id>", methods=["DELETE"])
+@roles_required("isps_officer","isps_office")
+def delete_rule(rule_id):
+    db = get_db()
+    db.execute("UPDATE custom_rules SET is_active=0 WHERE id=?", (rule_id,))
+    db.commit()
+    db.close()
+    return jsonify(ok=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIG (API keys — stored server-side only)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CONFIG_FILE = BASE_DIR / ".." / "config.json"
+
+@app.route("/api/config", methods=["GET"])
+@roles_required("isps_officer")
+def get_config():
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text())
+        # Mask keys
+        masked = {k: ("*" * 8 + v[-4:]) if v else "" for k, v in cfg.items()}
+        return jsonify(masked)
+    except:
+        return jsonify({})
+
+@app.route("/api/config", methods=["POST"])
+@roles_required("isps_officer")
+def save_config():
+    data = request.json or {}
+    try:
+        existing = {}
+        if CONFIG_FILE.exists():
+            existing = json.loads(CONFIG_FILE.read_text())
+        # Only update keys that are not masked
+        for k, v in data.items():
+            if v and not v.startswith("*"):
+                existing[k] = v
+        CONFIG_FILE.write_text(json.dumps(existing, indent=2))
+        # Apply to env
+        for k, v in existing.items():
+            os.environ[k.upper()] = v
+        return jsonify(ok=True)
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+def load_config():
+    if CONFIG_FILE.exists():
+        try:
+            cfg = json.loads(CONFIG_FILE.read_text())
+            for k, v in cfg.items():
+                os.environ.setdefault(k.upper(), v)
+        except:
+            pass
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STATIC FILES (serve the frontend)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_static(path):
+    client_dir = BASE_DIR / ".." / "client"
+    if path and (client_dir / path).exists():
+        return send_from_directory(str(client_dir), path)
+    return send_from_directory(str(client_dir), "index.html")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    load_config()
+    port = int(os.environ.get("PORT", 5050))
+    print(f"✓ ISPS HBT System running on http://localhost:{port}")
+    print(f"  DB: {DB_PATH}")
+    print(f"  Uploads: {UPLOAD_DIR}")
+    app.run(host="0.0.0.0", port=port, debug=False)
