@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: isps-hbt
+    env: docker
+    dockerfilePath: ./Dockerfile
+    buildCommand: docker build -t isps-hbt .
+    startCommand: gunicorn -w 2 -b 0.0.0.0:$PORT server.app:app
+    plan: free
+    healthCheckPath: /api/auth/me
+    autoDeploy: true
+    disk:
+      name: uploads
+      mountPath: /app/uploads
+      sizeGB: 1
