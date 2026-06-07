@@ -606,7 +606,7 @@ async function doLogin() {
     localStorage.setItem('isps_token', authToken);
     initApp();
   } catch(e) {
-    err.textContent = e.message;
+    err.textContent = e.message || 'Login failed. Please check your credentials or try again.';
     err.style.display = 'block';
   }
 }

@@ -24,8 +24,9 @@ import sqlite3
 # ── Config ────────────────────────────────────────────────────────────────────
 BASE_DIR   = Path(__file__).parent
 PROJECT_DIR = BASE_DIR.parent
-DB_PATH    = os.environ.get("DB_PATH", str(PROJECT_DIR / "isps_hbt.db"))
-UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", str(BASE_DIR / ".." / "uploads")))
+# Default DB to the persistent uploads disk on Render; falls back to project root locally
+DB_PATH    = os.environ.get("DB_PATH", str(PROJECT_DIR / "uploads" / "isps_hbt.db"))
+UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", str(PROJECT_DIR / "uploads")))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "isps-hbt-secret-change-in-production-2024")
@@ -996,6 +997,21 @@ def load_config():
         except:
             pass
 
+def ensure_db():
+    """Initialize database schema and seed users if the DB doesn't exist yet."""
+    try:
+        from server.db import init_db
+    except ImportError:
+        try:
+            from db import init_db
+        except ImportError:
+            print("[WARN] Could not import db.init_db — skipping auto-init")
+            return
+    try:
+        init_db()
+    except Exception as e:
+        print(f"[WARN] DB init error: {e}")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # STATIC FILES (serve the frontend)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1012,8 +1028,12 @@ def serve_static(path):
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Always ensure DB is initialised (covers gunicorn cold-start on Render)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+ensure_db()
+load_config()
+
 if __name__ == "__main__":
-    load_config()
     port = int(os.environ.get("PORT", 5050))
     print(f"[OK] ISPS HBT System running on http://localhost:{port}")
     print(f"  DB: {DB_PATH}")

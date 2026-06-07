@@ -9,7 +9,8 @@ import hashlib
 import json
 from datetime import datetime
 
-DB_PATH = os.environ.get("DB_PATH", "./isps_hbt.db")
+import os, pathlib as _pl
+DB_PATH = os.environ.get("DB_PATH", str(_pl.Path(__file__).parent.parent / "uploads" / "isps_hbt.db"))
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
