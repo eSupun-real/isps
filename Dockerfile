@@ -1,17 +1,18 @@
 FROM python:3.11-slim-bookworm
 
-RUN apt-get update && \
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -o Acquire::Retries=3 && \
     apt-get install -y --no-install-recommends \
         tesseract-ocr \
         poppler-utils \
         gcc \
         libjpeg62-turbo-dev \
-        libtiff5 \
+        libtiff6 \
         libopenjp2-7 \
         liblcms2-2 \
         libwebpdemux2 \
         libwebp-dev \
-        libimagequant0 \
         libgphoto2-6 \
         ca-certificates \
         curl && \
