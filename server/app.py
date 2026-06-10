@@ -8,6 +8,8 @@ import json
 import base64
 import subprocess
 import uuid
+import zipfile
+import tempfile
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
@@ -176,6 +178,9 @@ def build_compliance_prompt(texts: dict, custom_rules: list, vessel_name: str) -
         for i, r in enumerate(custom_rules, 1):
             rules_text += f"{i}. [{r['severity'].upper()}] {r['title']}: {r['description']}\n"
 
+    # Build doc_findings JSON including ALL doc types (including 'other')
+    doc_findings_json = ",\n    ".join([f'"{dt}": {{"status":"pass|fail|warn","issues":""}}' for dt in doc_types])
+    
     prompt = f"""
 Vessel: {vessel_name}
 
@@ -218,13 +223,14 @@ Return ONLY this JSON:
     "body": ""
   }},
   "doc_findings": {{
-    "pans": {{"status":"pass|fail|warn","issues":""}},
-    "issc": {{"status":"pass|fail|warn","issues":""}},
-    "csr": {{"status":"pass|fail|warn","issues":""}},
-    "dos": {{"status":"pass|fail|warn","issues":""}},
-    "crew_list": {{"status":"pass|fail|warn","issues":""}},
-    "armed_guards": {{"status":"pass|fail|warn","issues":""}},
-    "isps_checklist": {{"status":"pass|fail|warn","issues":""}}
+    {doc_findings_json}
+  }},
+  "document_classification": {{
+    "other": {{
+      "identified_type": "pans|issc|csr|dos|crew_list|armed_guards|isps_checklist|pi_certificate|hull_machinery|fal6|fal7|ship_particulars|none",
+      "confidence": 0.0-1.0,
+      "reasoning": "Why this classification was made"
+    }}
   }}
 }}
 
@@ -239,6 +245,8 @@ If overall=pass → email_port is a No-Objection Certificate.
 If overall=fail → email_port does NOT grant clearance; lists what is missing.
 If overall=warn → email_port grants conditional clearance noting warnings.
 flags[] must list EVERY discrepancy found.
+
+If there are documents under 'other' that contain security-relevant content, classify them in document_classification.other[]. If identified as a known type, the text should be moved to that field in the database.
 """
     return system, prompt
 
@@ -467,7 +475,6 @@ def analyse_vessel(call_id):
         "SELECT title,description,severity,category FROM custom_rules WHERE is_active=1"
     ).fetchall())
 
-    # Collect OCR'd texts
     doc_types = ["pans","issc","csr","dos","crew_list","armed_guards","isps_checklist",
                  "pi_certificate","hull_machinery","fal6","fal7","ship_particulars","other"]
     texts = {}
@@ -515,7 +522,9 @@ def analyse_vessel(call_id):
 
     # Update doc discrepancies per-document
     doc_findings = parsed.get("doc_findings", {})
-    for dt in doc_types:
+    known_doc_types = ["pans","issc","csr","dos","crew_list","armed_guards","isps_checklist",
+                      "pi_certificate","hull_machinery","fal6","fal7","ship_particulars"]
+    for dt in known_doc_types:
         finding = doc_findings.get(dt, {})
         status = finding.get("status", "pass")
         issues = finding.get("issues", "")
@@ -525,6 +534,38 @@ def analyse_vessel(call_id):
             SET doc_{dt}_discrepancy=?, doc_{dt}_disc_detail=?
             WHERE call_id=?
         """, (disc_flag, issues, call_id))
+    
+    # Handle 'other' document classification and re-routing
+    other_text = doc_rec.get("doc_other_text") or ""
+    other_path = doc_rec.get("doc_other_path", "")
+    if other_text.strip() and other_path:
+        doc_classification = parsed.get("document_classification", {}).get("other", {})
+        identified_type = doc_classification.get("identified_type", "none")
+        confidence = float(doc_classification.get("confidence", 0))
+        
+        if identified_type and identified_type in known_doc_types and confidence > 0.5:
+            # Get discrepancy info for the identified type
+            other_finding = doc_findings.get(identified_type, {})
+            other_status = other_finding.get("status", "pass")
+            other_issues = other_finding.get("issues", "")
+            other_disc_flag = 1 if other_status in ("fail","warn") else 0
+            
+            # Move 'other' text to the identified field
+            db.execute(f"""
+                UPDATE vessel_documents
+                SET doc_{identified_type}_text=?,
+                    doc_{identified_type}_received=1,
+                    doc_{identified_type}_discrepancy=?,
+                    doc_{identified_type}_disc_detail=?
+                WHERE call_id=?
+            """, (other_text, other_disc_flag, other_issues, call_id))
+            
+            # Clear the 'other' text field but keep the file path for reference
+            db.execute("""
+                UPDATE vessel_documents
+                SET doc_other_text=''
+                WHERE call_id=?
+            """, (call_id,))
 
     # Save full compliance result
     overall = parsed.get("overall","pass")
@@ -1011,6 +1052,139 @@ def ensure_db():
         init_db()
     except Exception as e:
         print(f"[WARN] DB init error: {e}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# THUMBNAILS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/documents/<path:filename>/thumbnail")
+@jwt_required()
+def get_document_thumbnail(filename):
+    """Get thumbnail preview for a document."""
+    doc_path = UPLOAD_DIR / filename
+    if not doc_path.exists():
+        return jsonify(error="Document not found"), 404
+    try:
+        from server.thumbnail import get_document_thumbnail as gen_thumb
+    except ImportError:
+        from thumbnail import get_document_thumbnail as gen_thumb
+    result = gen_thumb(str(doc_path))
+    if result.get("thumbnail"):
+        return jsonify(thumbnail=result["thumbnail"])
+    return jsonify(thumbnail=None)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ZIP UPLOAD EXTRACTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def identify_doc_type_from_filename(filename: str) -> tuple:
+    """Identify document type from filename. Returns (doc_type, confidence)."""
+    lower = filename.lower().replace("_", " ").replace("-", " ")
+    patterns = {
+        "pans": ["pans", "pre arrival", "prearrival", "pre-arrival"],
+        "issc": ["issc", "ship security cert", "shipsecurity"],
+        "csr": ["csr", "continuous synopsis", "synopsis record"],
+        "dos": ["dos", "declaration of security", "decl sec", "decl_sec"],
+        "crew_list": ["crew", "fal5", "fal 5", "fal_5", "crew_list"],
+        "fal6": ["fal6", "fal 6", "fal_6", "passenger", "pax"],
+        "fal7": ["fal7", "fal 7", "fal_7", "dangerous", "dg", "hazmat"],
+        "armed_guards": ["armed", "guard", "weapon", "pcasp"],
+        "isps_checklist": ["checklist", "isps_check", "check_list", "navy check"],
+        "pi_certificate": ["p&i", "p_i", "pi_cert", "protection indem", "club cert", "coe"],
+        "hull_machinery": ["hull", "h&m", "h_m", "machinery"],
+        "ship_particulars": ["particular", "vessel detail", "ship_part", "ship particulars"],
+    }
+    for doc_type, pats in patterns.items():
+        for p in pats:
+            if p in lower:
+                return doc_type, 0.9
+    return "other", 0.1
+
+@app.route("/api/vessels/<int:call_id>/documents/zip", methods=["POST"])
+@jwt_required()
+def upload_zip_documents(call_id):
+    """
+    Accepts JSON: { zip_b64: "...", zip_filename: "archive.zip" }
+    Extracts ZIP, identifies document types, and processes each file.
+    """
+    uid = int(get_jwt_identity())
+    data = request.json or {}
+    zip_b64 = data.get("zip_b64", "")
+    zip_filename = data.get("zip_filename", "archive.zip")
+    
+    if not zip_b64:
+        return jsonify(error="No ZIP data provided"), 400
+    
+    db = get_db()
+    vessel = row_to_dict(db.execute("SELECT * FROM vessel_calls WHERE id=?", (call_id,)).fetchone())
+    if not vessel:
+        db.close()
+        return jsonify(error="Vessel call not found"), 404
+    
+    doc_rec = row_to_dict(db.execute("SELECT * FROM vessel_documents WHERE call_id=?", (call_id,)).fetchone())
+    if not doc_rec:
+        db.execute("INSERT INTO vessel_documents(call_id,submitted_by) VALUES(?,?)", (call_id, uid))
+        db.commit()
+    
+    results = {}
+    extracted_files = []
+    
+    try:
+        zip_bytes = base64.b64decode(zip_b64)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = Path(tmpdir) / zip_filename
+            with open(zip_path, "wb") as f:
+                f.write(zip_bytes)
+            
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                for zinfo in zf.namelist():
+                    if zinfo.endswith('/'):
+                        continue
+                    ext = Path(zinfo).suffix.lower()
+                    if ext not in ['.pdf', '.docx', '.doc', '.eml', '.png', '.jpg', '.jpeg', '.tif', '.tiff']:
+                        continue
+                    
+                    file_bytes = zf.read(zinfo)
+                    file_b64 = base64.b64encode(file_bytes).decode()
+                    extracted_files.append({
+                        "filename": Path(zinfo).name,
+                        "b64": file_b64,
+                        "doc_type": "other"
+                    })
+    
+        for ef in extracted_files:
+            doc_type, confidence = identify_doc_type_from_filename(ef["filename"])
+            ef["doc_type"] = doc_type
+            ef["confidence"] = confidence
+            
+            ext = Path(ef["filename"]).suffix
+            save_name = f"{call_id}_{doc_type}_{uuid.uuid4().hex[:8]}{ext}"
+            save_path = UPLOAD_DIR / save_name
+            with open(save_path, "wb") as f:
+                f.write(base64.b64decode(ef["b64"]))
+            
+            ocr_result = run_ocr(ef["b64"], ef["filename"])
+            text = ocr_result.get("text", "")
+            method = ocr_result.get("method", "unknown")
+            
+            db.execute(f"""
+                UPDATE vessel_documents
+                SET doc_{doc_type}_path=?,
+                    doc_{doc_type}_text=?,
+                    doc_{doc_type}_received=1,
+                    updated_at=datetime('now')
+                WHERE call_id=?
+            """, (str(save_path), text, call_id))
+            
+            results[ef["filename"]] = {"doc_type": doc_type, "method": method, "chars": len(text), "saved": save_name, "confidence": confidence}
+        
+        db.execute("UPDATE vessel_calls SET status='documents_submitted',updated_at=datetime('now') WHERE id=?", (call_id,))
+        log_action(db, call_id, uid, "documents_uploaded_zip", json.dumps(list(results.keys())))
+        db.commit()
+        return jsonify(ok=True, ocr_results=results, extracted_files=extracted_files)
+    except Exception as e:
+        db.close()
+        return jsonify(error=f"ZIP extraction failed: {str(e)}"), 500
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STATIC FILES (serve the frontend)

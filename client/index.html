@@ -1358,7 +1358,7 @@
               <div class="bulk-upload-zone" id="bulkDropZone"
                 ondragover="event.preventDefault();this.classList.add('drag-over')"
                 ondragleave="this.classList.remove('drag-over')" ondrop="handleBulkDrop(event)">
-                <input type="file" id="bulkFileInput" multiple accept=".pdf,.docx,.doc,.eml"
+                <input type="file" id="bulkFileInput" multiple accept=".pdf,.docx,.doc,.eml,.zip"
                   onchange="handleBulkFiles(this.files)">
                 <div class="bz-icon">📂</div>
                 <div class="bz-title">Click to select all files, or drag &amp; drop here</div>
@@ -1916,13 +1916,30 @@
         });
 
         const callId = callData.call_id;
-        status.innerHTML = `<span class="spinner"></span> Running local OCR on ${Object.keys(pendingDocs).length} documents…`;
-
-        if (Object.keys(pendingDocs).length > 0) {
-          const docs = Object.entries(pendingDocs).map(([dt, f]) => ({
-            doc_type: dt, filename: f.filename, b64: f.b64
-          }));
-          await api('POST', `/api/vessels/${callId}/documents`, { docs });
+        
+        // Collect all documents to upload: pendingDocs (individual slots) + bulkFileMap (bulk uploads)
+        const allDocs = [];
+        
+        // Add pending docs from individual slots
+        for (const [dt, f] of Object.entries(pendingDocs)) {
+          allDocs.push({ doc_type: dt, filename: f.filename, b64: f.b64 });
+        }
+        
+        // Add docs from bulkFileMap
+        for (const entry of bulkFileMap) {
+          if (entry.docType !== 'other') {
+            const reader = new FileReader();
+            const b64 = await new Promise(resolve => {
+              reader.onload = e => resolve(e.target.result.split(',')[1]);
+              reader.readAsDataURL(entry.file);
+            });
+            allDocs.push({ doc_type: entry.docType, filename: entry.file.name, b64 });
+          }
+        }
+        
+        if (allDocs.length > 0) {
+          status.innerHTML = `<span class="spinner"></span> Running local OCR on ${allDocs.length} documents…`;
+          await api('POST', `/api/vessels/${callId}/documents`, { docs: allDocs });
         }
 
         status.innerHTML = '✅ Submitted successfully! Voyage ref: <strong>' + callData.voyage_ref + '</strong>';
@@ -1949,10 +1966,13 @@
         slot.querySelector('.lbl').textContent = labels[dt] || dt;
       });
       pendingDocs = {};
+      bulkFileMap = [];
       document.getElementById('submitStatus').style.display = 'none';
       document.getElementById('submitMapContainer').style.display = 'none';
       document.getElementById('s_lat').value = '';
       document.getElementById('s_lon').value = '';
+      document.getElementById('bulkPreviewSection').classList.remove('show');
+      document.getElementById('bulkFileInput').value = '';
       if (window.maps && window.maps['s_map']) {
         try { window.maps['s_map'].remove(); delete window.maps['s_map']; } catch (e) { }
       }
@@ -2028,19 +2048,35 @@
       const docs = d.documents || {};
       const docTypes = ['pans', 'issc', 'csr', 'dos', 'crew_list', 'armed_guards', 'isps_checklist', 'pi_certificate', 'hull_machinery', 'fal6', 'fal7', 'ship_particulars'];
       const docLabels = { pans: 'PANS', issc: 'ISSC', csr: 'CSR', dos: 'Declaration of Security', crew_list: 'Crew List (FAL5)', armed_guards: 'Armed Guards', isps_checklist: 'ISPS Checklist', pi_certificate: 'P&I Certificate', hull_machinery: 'Hull & Machinery', fal6: 'Passenger List (FAL6)', fal7: 'Dangerous Goods (FAL7)', ship_particulars: 'Ship Particulars' };
+      
+      // Helper to get thumbnail URL
+      function getThumbUrl(path) {
+        if (!path) return null;
+        const filename = path.split(/[/\\]/).pop();
+        return `/api/documents/${filename}/thumbnail`;
+      }
+      
       const docRows = docTypes.map(dt => {
         const received = docs[`doc_${dt}_received`];
         const disc = docs[`doc_${dt}_discrepancy`];
         const detail = docs[`doc_${dt}_disc_detail`] || '';
         const corrective = docs[`doc_${dt}_corrective`] || '';
+        const docPath = docs[`doc_${dt}_path`] || '';
+        const thumbUrl = getThumbUrl(docPath);
+        
         if (!received) return `<div class="doc-review-row"><div class="doc-review-hdr"><div class="doc-type-label">${docLabels[dt] || dt}</div><span class="disc-status" style="background:#eee;color:#999">Not received</span></div></div>`;
         return `<div class="doc-review-row">
       <div class="doc-review-hdr">
         <div class="doc-type-label">${docLabels[dt] || dt}</div>
         <span class="disc-status ${disc ? 'ds-issue' : 'ds-ok'}">${disc ? '⚠ Issue' : '✓ OK'}</span>
       </div>
-      ${detail ? `<div style="font-size:12px;color:var(--fail);margin-bottom:6px">📌 ${detail}</div>` : ''}
-      ${corrective ? `<div style="font-size:12px;color:var(--pass)">✔ Corrective: ${corrective}</div>` : ''}
+      <div style="display:flex;gap:12px;align-items:flex-start">
+        ${thumbUrl ? `<img src="${thumbUrl}" onload="this.style.opacity=1" onerror="this.style.display='none'" style="width:80px;height:auto;border:1px solid var(--border);border-radius:4px;opacity:0;transition:opacity 0.3s" alt="Thumbnail">` : '<div style="width:80px;height:100px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text3)">No preview</div>'}
+        <div style="flex:1">
+          ${detail ? `<div style="font-size:12px;color:var(--fail);margin-bottom:6px">📌 ${detail}</div>` : ''}
+          ${corrective ? `<div style="font-size:12px;color:var(--pass)">✔ Corrective: ${corrective}</div>` : ''}
+        </div>
+      </div>
     </div>`;
       }).join('');
       document.getElementById('reviewDocStatus').innerHTML = `
@@ -2445,27 +2481,84 @@
       bulkFileMap = [];
       const tbody = document.getElementById('bulkMapBody');
       tbody.innerHTML = '';
-      Array.from(files).forEach((file, i) => {
-        const identified = identifyDocType(file.name);
-        bulkFileMap.push({ file, docType: identified.type, label: identified.label });
-        const optionsHtml = DOC_TYPE_PATTERNS.map(dt =>
-          `<option value="${dt.type}" ${dt.type === identified.type ? 'selected' : ''}>${dt.label}</option>`
-        ).join('') + `<option value="other" ${identified.type === 'other' ? 'selected' : ''}>Other / Skip</option>`;
-        const confidence = identified.type !== 'other' ? '✅ Auto-matched' : '❓ Unrecognized';
-        const confColor = identified.type !== 'other' ? 'var(--pass)' : 'var(--warn)';
-        tbody.innerHTML += `
-      <tr id="brow-${i}">
-        <td><div class="bulk-fname">${file.name}</div><div style="font-size:10px;color:var(--text3)">${(file.size / 1024).toFixed(0)} KB</div></td>
-        <td><span style="font-size:11px;color:${confColor};font-weight:600">${confidence}</span></td>
-        <td>
-          <select style="font-size:12px;padding:4px 6px;border:1px solid var(--border2);border-radius:4px;background:var(--bg);font-family:var(--font)" onchange="bulkFileMap[${i}].docType=this.value;bulkFileMap[${i}].label=this.options[this.selectedIndex].text">
-            ${optionsHtml}
-          </select>
-        </td>
-        <td><button class="btn btn-sm" style="padding:3px 8px;background:none;border:1px solid var(--border2);font-size:11px" onclick="bulkFileMap.splice(${i},1);this.closest('tr').remove()">✕</button></td>
-      </tr>`;
-      });
-      document.getElementById('bulkPreviewSection').classList.add('show');
+      
+      // Process files - handle ZIP archives
+      const processFile = async (file, indexOffset) => {
+        if (file.name.toLowerCase().endsWith('.zip')) {
+          // Handle ZIP file
+          const reader = new FileReader();
+          const zip = await new Promise(resolve => {
+            reader.onload = e => resolve(e.target.result);
+            reader.readAsArrayBuffer(file);
+          });
+          const files_list = await extractZipFiles(zip, file.name);
+          return files_list.map((f, i) => ({ file: f.file, originalZip: file.name, zipIndex: i + indexOffset }));
+        }
+        return [{ file, originalZip: null, zipIndex: indexOffset }];
+      };
+      
+      // Process all files including ZIP extraction
+      (async () => {
+        const allFiles = [];
+        let idx = 0;
+        for (const file of Array.from(files)) {
+          const extracted = await processFile(file, idx);
+          allFiles.push(...extracted);
+          idx += extracted.length;
+        }
+        
+        allFiles.forEach((entry, i) => {
+          const file = entry.file;
+          const fromZip = entry.originalZip;
+          const identified = identifyDocType(file.name);
+          bulkFileMap.push({ file, docType: identified.type, label: identified.label, fromZip });
+          const optionsHtml = DOC_TYPE_PATTERNS.map(dt =>
+            `<option value="${dt.type}" ${dt.type === identified.type ? 'selected' : ''}>${dt.label}</option>`
+          ).join('') + `<option value="other" ${identified.type === 'other' ? 'selected' : ''}>Other / Skip</option>`;
+          const confidence = identified.type !== 'other' ? '✅ Auto-matched' : '❓ Unrecognized';
+          const confColor = identified.type !== 'other' ? 'var(--pass)' : 'var(--warn)';
+          tbody.innerHTML += `
+        <tr id="brow-${i}">
+          <td><div class="bulk-fname">${file.name}</div><div style="font-size:10px;color:var(--text3)">${(file.size / 1024).toFixed(0)} KB${fromZip ? `<br><span style="color:var(--navy);font-size:10px">From: ${fromZip}</span>` : ''}</div></td>
+          <td><span style="font-size:11px;color:${confColor};font-weight:600">${confidence}</span></td>
+          <td>
+            <select style="font-size:12px;padding:4px 6px;border:1px solid var(--border2);border-radius:4px;background:var(--bg);font-family:var(--font)" onchange="bulkFileMap[${i}].docType=this.value;bulkFileMap[${i}].label=this.options[this.selectedIndex].text">
+              ${optionsHtml}
+            </select>
+          </td>
+          <td><button class="btn btn-sm" style="padding:3px 8px;background:none;border:1px solid var(--border2);font-size:11px" onclick="bulkFileMap.splice(${i},1);this.closest('tr').remove()">✕</button></td>
+        </tr>`;
+        });
+        document.getElementById('bulkPreviewSection').classList.add('show');
+      })();
+    }
+    
+    async function extractZipFiles(arrayBuffer, zipName) {
+      const files = [];
+      try {
+        // Load JSZip dynamically if needed
+        if (typeof JSZip === 'undefined') {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js';
+            script.onload = resolve;
+            script.onerror = reject;
+            document.head.appendChild(script);
+          });
+        }
+        const zip = await window.JSZip.loadAsync(arrayBuffer);
+        for (const name of Object.keys(zip.files)) {
+          const entry = zip.files[name];
+          if (!entry.dir) {
+            const blob = await entry.async('blob');
+            files.push({ file: new File([blob], name), name });
+          }
+        }
+      } catch (e) {
+        console.error('ZIP extraction error:', e);
+        toast('ZIP extraction failed: ' + e.message, 'err');
+      }
+      return files;
     }
 
     async function applyBulkMapping() {
