@@ -158,6 +158,22 @@ def init_db():
         created_at  TEXT DEFAULT (datetime('now'))
     )""")
 
+    # ── LLM Call Logs ──────────────────────────────────────────────────────
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS llm_logs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        call_id     INTEGER REFERENCES vessel_calls(id),
+        user_id     INTEGER REFERENCES users(id),
+        provider    TEXT NOT NULL,
+        model       TEXT,
+        prompt      TEXT,
+        response    TEXT,
+        error       TEXT,
+        status      TEXT NOT NULL DEFAULT 'success',
+        duration_ms INTEGER,
+        created_at  TEXT DEFAULT (datetime('now'))
+    )""")
+
     conn.commit()
 
     # ── Seed default users if none exist ─────────────────────────────────────

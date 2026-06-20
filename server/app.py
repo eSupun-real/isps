@@ -59,6 +59,33 @@ def log_action(conn, call_id, user_id, action, detail=""):
         (call_id, user_id, action, detail)
     )
 
+def log_llm_call(conn, call_id, user_id, provider, model, prompt, response, error, duration_ms, status):
+    conn.execute(
+        "INSERT INTO llm_logs(call_id,user_id,provider,model,prompt,response,error,duration_ms,status) VALUES(?,?,?,?,?,?,?,?,?)",
+        (call_id, user_id, provider, model, prompt, response, error, duration_ms, status)
+    )
+
+def get_llm_model(provider):
+    key = f"{provider.upper()}_MODEL"
+    model = os.environ.get(key, "")
+    if not model:
+        defaults = {
+            "anthropic": "claude-haiku-4-5-20251001",
+            "openai": "gpt-4o-mini",
+            "openrouter": "anthropic/claude-haiku-4-5"
+        }
+        model = defaults.get(provider, "")
+    return model
+
+def get_active_provider():
+    try:
+        if CONFIG_FILE.exists():
+            cfg = json.loads(CONFIG_FILE.read_text())
+            return cfg.get("ACTIVE_PROVIDER", "anthropic")
+    except:
+        pass
+    return "anthropic"
+
 # ── Role decorator ────────────────────────────────────────────────────────────
 def roles_required(*roles):
     def decorator(fn):
@@ -72,20 +99,23 @@ def roles_required(*roles):
         return wrapper
     return decorator
 
-# ── OCR extraction (calls Python subprocess) ─────────────────────────────────
-def run_ocr(b64: str, filename: str) -> dict:
-    script = str(BASE_DIR / "ocr_extract.py")
-    inp = json.dumps({"b64": b64, "filename": filename})
+def run_text_extract_api(filepath: str) -> str:
+    url = os.environ.get("TEXT_EXTRACT_API_URL", "http://localhost:8000/api/v1/extract")
     try:
+        # Use curl to avoid requests dependency issues
         result = subprocess.run(
-            [sys.executable, script],
-            input=inp, capture_output=True, text=True, timeout=120
+            ["curl", "-s", "-X", "POST", url, "-F", f"file=@{filepath}"],
+            capture_output=True, text=True, timeout=120
         )
         if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout)
-        return {"text": "", "method": "error", "char_count": 0}
+            try:
+                data = json.loads(result.stdout)
+                return data.get("text", "") or data.get("markdown", "") or result.stdout
+            except json.JSONDecodeError:
+                return result.stdout
     except Exception as e:
-        return {"text": "", "method": "error", "error": str(e), "char_count": 0}
+        print(f"Error calling text-extract-api via curl: {e}")
+    return ""
 
 # ── LLM call (multi-provider) ─────────────────────────────────────────────────
 def call_llm(prompt: str, system: str = "", provider: str = "anthropic") -> str:
@@ -162,6 +192,10 @@ def build_compliance_prompt(texts: dict, custom_rules: list, vessel_name: str) -
         "You are an ISPS compliance expert at Hambantota International Port, Sri Lanka. "
         "Analyse vessel security documents and return ONLY valid JSON — no markdown, no explanation."
     )
+
+    # Document types for the JSON template
+    doc_types = ["pans", "issc", "csr", "dos", "crew_list", "armed_guards", "isps_checklist",
+                 "pi_certificate", "hull_machinery", "fal6", "fal7", "ship_particulars", "other"]
 
     # Concatenate all extracted texts (already done locally via OCR — no file sent to LLM)
     doc_sections = []
@@ -289,6 +323,33 @@ def me():
     db.close()
     return jsonify(user)
 
+@app.route("/api/auth/settings", methods=["PATCH"])
+@roles_required("agent")
+def update_settings():
+    """Update agent's own profile (name, email, phone, company)"""
+    uid = int(get_jwt_identity())
+    data = request.json or {}
+    full_name = data.get("full_name", "").strip()
+    email = data.get("email", "").strip()
+    phone = data.get("phone", "").strip()
+    company = data.get("company", "").strip()
+    
+    if not full_name or not email:
+        return jsonify(error="Name and email are required"), 400
+    
+    db = get_db()
+    db.execute(
+        "UPDATE users SET full_name=?, email=?, phone=?, company=? WHERE id=?",
+        (full_name, email, phone, company, uid)
+    )
+    db.commit()
+    
+    user = row_to_dict(db.execute(
+        "SELECT id,username,role,full_name,email,phone,company FROM users WHERE id=?", (uid,)
+    ).fetchone())
+    db.close()
+    return jsonify(user)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # VESSEL CALLS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -385,7 +446,7 @@ def update_status(call_id):
 def upload_documents(call_id):
     """
     Accepts JSON: { docs: [{ doc_type, filename, b64 }] }
-    Runs local OCR on each file — NO LLM call here.
+    Saves files to disk. OCR is deferred to the analysis phase.
     """
     uid = int(get_jwt_identity())
     data = request.json or {}
@@ -420,11 +481,6 @@ def upload_documents(call_id):
         with open(save_path, "wb") as f:
             f.write(base64.b64decode(b64))
 
-        # Run OCR locally
-        ocr_result = run_ocr(b64, filename)
-        text = ocr_result.get("text", "")
-        method = ocr_result.get("method", "unknown")
-
         # Update DB columns
         safe_type = doc_type if doc_type in [
             "pans","issc","csr","dos","crew_list","armed_guards","isps_checklist",
@@ -434,20 +490,19 @@ def upload_documents(call_id):
         db.execute(f"""
             UPDATE vessel_documents
             SET doc_{safe_type}_path=?,
-                doc_{safe_type}_text=?,
                 doc_{safe_type}_received=1,
                 updated_at=datetime('now')
             WHERE call_id=?
-        """, (str(save_path), text, call_id))
+        """, (str(save_path), call_id))
 
-        results[doc_type] = {"method": method, "chars": len(text), "saved": save_name}
+        results[doc_type] = {"saved": save_name}
 
     # Update vessel status
     db.execute("UPDATE vessel_calls SET status='documents_submitted',updated_at=datetime('now') WHERE id=?", (call_id,))
     log_action(db, call_id, uid, "documents_uploaded", json.dumps(list(results.keys())))
     db.commit()
     db.close()
-    return jsonify(ok=True, ocr_results=results)
+    return jsonify(ok=True, upload_results=results)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # COMPLIANCE ANALYSIS (LLM — called explicitly by ISPS office)
@@ -462,7 +517,7 @@ def analyse_vessel(call_id):
     """
     uid = int(get_jwt_identity())
     data = request.json or {}
-    provider = data.get("provider", "anthropic")
+    provider = data.get("provider", "") or get_active_provider()
 
     db = get_db()
     vessel = row_to_dict(db.execute("SELECT * FROM vessel_calls WHERE id=?", (call_id,)).fetchone())
@@ -477,19 +532,73 @@ def analyse_vessel(call_id):
 
     doc_types = ["pans","issc","csr","dos","crew_list","armed_guards","isps_checklist",
                  "pi_certificate","hull_machinery","fal6","fal7","ship_particulars","other"]
+
+    # 1. OCR the PANS document first
+    pans_path = doc_rec.get("doc_pans_path")
+    pans_text = doc_rec.get("doc_pans_text") or ""
+    if pans_path and not pans_text:
+        pans_text = run_text_extract_api(pans_path)
+        db.execute("UPDATE vessel_documents SET doc_pans_text=? WHERE call_id=?", (pans_text, call_id))
+        db.commit()
+
+    # 2. Ask LLM what documents are required based on PANS
+    required_docs = doc_types # default to all
+    if pans_text:
+        req_prompt = f"Based on the following PANS document text, which of these document types are required for this vessel call? {doc_types}\n\nPANS Text:\n{pans_text[:4000]}\n\nReturn ONLY a JSON array of the required document types (e.g. [\"pans\", \"issc\"])."
+        req_system = "You are an assistant that extracts required document types from a Pre-Arrival Notification (PANS)."
+        try:
+            req_raw = call_llm(req_prompt, req_system, provider)
+            clean = req_raw.replace("```json","").replace("```","").strip()
+            s = clean.find("["); e2 = clean.rfind("]")
+            if s != -1 and e2 != -1:
+                parsed_reqs = json.loads(clean[s:e2+1])
+                required_docs = [d for d in parsed_reqs if d in doc_types]
+                if "pans" not in required_docs:
+                    required_docs.append("pans")
+        except Exception as e:
+            print("Failed to get required docs from LLM:", e)
+
+    # 3. OCR the required documents
     texts = {}
     for dt in doc_types:
-        t = doc_rec.get(f"doc_{dt}_text") or ""
-        if t.strip():
-            texts[dt] = t
+        if dt not in required_docs:
+            continue
+        path = doc_rec.get(f"doc_{dt}_path")
+        text = doc_rec.get(f"doc_{dt}_text")
+        if path and not text:
+            text = run_text_extract_api(path)
+            db.execute(f"UPDATE vessel_documents SET doc_{dt}_text=? WHERE call_id=?", (text, call_id))
+            db.commit()
+        if text and text.strip():
+            texts[dt] = text
 
     system, prompt = build_compliance_prompt(texts, custom_rules, vessel["vessel_name"])
+    model = get_llm_model(provider)
+
+    import time
+    start_ms = int(time.time() * 1000)
+    raw = ""
+    llm_error = None
 
     try:
         raw = call_llm(prompt, system, provider)
     except Exception as e:
+        llm_error = str(e)
+        duration_ms = int(time.time() * 1000) - start_ms
+        log_llm_call(db, call_id, uid, provider, model, prompt[:3000], "", llm_error, duration_ms, "error")
+        db.commit()
         db.close()
-        return jsonify(error=f"LLM error: {str(e)}"), 500
+        return jsonify(error=f"LLM error: {llm_error}"), 500
+
+    duration_ms = int(time.time() * 1000) - start_ms
+
+    # Check if LLM returned valid response
+    if not raw or not raw.strip():
+        llm_error = "Empty response"
+        log_llm_call(db, call_id, uid, provider, model, prompt[:3000], "", llm_error, duration_ms, "error")
+        db.commit()
+        db.close()
+        return jsonify(error="LLM returned empty response. Check API key and quota."), 500
 
     # Parse JSON from LLM response
     parsed = None
@@ -498,8 +607,13 @@ def analyse_vessel(call_id):
         s = clean.index("{"); e2 = clean.rindex("}")
         parsed = json.loads(clean[s:e2+1])
     except Exception:
+        log_llm_call(db, call_id, uid, provider, model, prompt[:3000], raw[:5000], "LLM returned invalid JSON", duration_ms, "parse_error")
+        db.commit()
         db.close()
-        return jsonify(error="LLM returned invalid JSON", raw=raw[:500]), 500
+        return jsonify(error="LLM returned invalid JSON", raw=raw[:500] if raw else ""), 500
+
+    # Log successful call
+    log_llm_call(db, call_id, uid, provider, model, prompt[:3000], raw[:5000], None, duration_ms, "success")
 
     # Update vessel fields from LLM extraction
     v = parsed.get("vessel", {})
@@ -767,6 +881,32 @@ def save_config():
         return jsonify(ok=True)
     except Exception as e:
         return jsonify(error=str(e)), 500
+
+@app.route("/api/config/active-provider", methods=["GET"])
+@roles_required("isps_officer", "isps_office")
+def get_active_provider_endpoint():
+    provider = get_active_provider()
+    model = get_llm_model(provider)
+    return jsonify(provider=provider, model=model)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LLM LOGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/llm-logs", methods=["GET"])
+@roles_required("isps_officer")
+def get_llm_logs():
+    db = get_db()
+    rows = rows_to_list(db.execute("""
+        SELECT l.*, v.vessel_name, u.full_name as user_name
+        FROM llm_logs l
+        LEFT JOIN vessel_calls v ON l.call_id = v.id
+        LEFT JOIN users u ON l.user_id = u.id
+        ORDER BY l.created_at DESC
+        LIMIT 200
+    """).fetchall())
+    db.close()
+    return jsonify(rows)
 
 # ── Fallback mock data and dynamic lookup for vessels ─────────────────────────
 MOCK_VESSELS = {

@@ -949,6 +949,70 @@
       flex: 1
     }
 
+    /* ── LLM Logs ── */
+    .llm-log-row {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 6px;
+      cursor: pointer;
+      overflow: hidden
+    }
+
+    .llm-log-row:hover {
+      border-color: var(--navy)
+    }
+
+    .llm-log-hdr {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      background: var(--surface);
+      font-size: 12px
+    }
+
+    .llm-log-body {
+      border-top: 1px solid var(--border);
+      padding: 14px;
+      background: var(--surface2);
+      font-size: 12px
+    }
+
+    .llm-log-section {
+      margin-bottom: 12px
+    }
+
+    .llm-log-section.error {
+      background: var(--fail-bg);
+      border: 1px solid var(--fail-border);
+      border-radius: var(--radius);
+      padding: 10px;
+      color: var(--fail)
+    }
+
+    .llm-log-section.warn {
+      background: var(--warn-bg);
+      border: 1px solid var(--warn-border);
+      border-radius: var(--radius);
+      padding: 10px;
+      color: var(--warn)
+    }
+
+    .llm-log-section pre {
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius);
+      padding: 10px;
+      font-size: 11px;
+      font-family: var(--mono);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 300px;
+      overflow-y: auto;
+      margin-top: 6px;
+      line-height: 1.5
+    }
+
     .rule-body strong {
       font-size: 13px;
       color: var(--text);
@@ -1199,7 +1263,7 @@
             Vessel Calls <span class="badge-count" id="vesselCount">0</span>
           </div>
         </div>
-        <div class="nav-group" id="navAgent" style="display:none">
+        <div class="nav-group" id="navAgent">
           <div class="nav-label">Agent</div>
           <div class="nav-item" onclick="showPage('submit')" data-page="submit">
             <svg class="ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -1207,6 +1271,13 @@
               <path d="M12 2v4h4M8 13h4M8 10h4" />
             </svg>
             Submit Documents
+          </div>
+          <div class="nav-item" onclick="showPage('settings')" data-page="settings">
+            <svg class="ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+              <circle cx="10" cy="7" r="3" />
+              <path d="M10 13c-3 0-5-1.5-5-3v-2h10v2c0 1.5-2 3-5 3z" />
+            </svg>
+            My Settings
           </div>
         </div>
         <div class="nav-group" id="navISPS" style="display:none">
@@ -1242,6 +1313,14 @@
                 d="M10 2v2M10 16v2M2 10h2M16 10h2M4.22 4.22l1.42 1.42M14.36 14.36l1.42 1.42M4.22 15.78l1.42-1.42M14.36 5.64l1.42-1.42" />
             </svg>
             Configuration
+          </div>
+          <div class="nav-item" onclick="showPage('llmlogs')" data-page="llmlogs">
+            <svg class="ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+              <rect x="3" y="3" width="14" height="14" rx="2" />
+              <path d="M7 10l2 2 4-4" />
+              <path d="M5 16l3-4 2 2 4-5" />
+            </svg>
+            LLM Call Logs
           </div>
         </div>
       </aside>
@@ -1514,12 +1593,9 @@
                 Back</button>
               <button class="btn btn-primary" id="btnAnalyse" onclick="runAnalysis()"><span class="spinner"
                   id="analyseSpinner" style="display:none"></span>Run AI Analysis</button>
-              <select id="llmProvider"
-                style="border:1px solid var(--border2);border-radius:var(--radius);padding:8px 10px;font-size:12px;background:var(--bg);font-family:var(--font)">
-                <option value="anthropic">Anthropic (Claude Haiku)</option>
-                <option value="openai">OpenAI (GPT-4o-mini)</option>
-                <option value="openrouter">OpenRouter</option>
-              </select>
+              <span id="reviewProviderBadge"
+                style="font-size:11px;color:var(--text3);font-family:var(--mono);padding:6px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface2)">Loading
+                provider…</span>
             </div>
             <div id="reviewVesselInfo"></div>
             <div id="reviewDocStatus"></div>
@@ -1598,6 +1674,37 @@
           </div>
         </div>
 
+        <!-- ── AGENT SETTINGS ── -->
+        <div class="page" id="page-settings">
+          <div class="page-hdr">
+            <div>
+              <h1>My Settings</h1>
+              <p>Set your default details — they'll auto-fill when submitting vessel calls</p>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">Default Agent Information</div>
+            <p style="font-size:12px;color:var(--text2);margin-bottom:14px">These details will be used as defaults for
+              new vessel submissions. You can still override them per submission.</p>
+            <div class="form-row">
+              <div class="form-group"><label>Your Name</label><input id="settings_name"
+                  placeholder="e.g. Sajiv Madasamy"></div>
+              <div class="form-group"><label>Your Email</label><input id="settings_email"
+                  placeholder="e.g. sa.jiv@company.com" type="email"></div>
+            </div>
+            <div class="form-row">
+              <div class="form-group"><label>Phone Number</label><input id="settings_phone"
+                  placeholder="e.g. 011 2304721"></div>
+              <div class="form-group"><label>Company Name</label><input id="settings_company"
+                  placeholder="e.g. MOL Logistics Lanka (Pvt) Ltd"></div>
+            </div>
+            <div class="btn-row" style="margin-top:8px">
+              <button class="btn btn-primary" onclick="saveAgentSettings()">Save Settings</button>
+            </div>
+            <div id="settingsStatus" style="display:none;font-size:13px;margin-top:8px"></div>
+          </div>
+        </div>
+
         <!-- ── CUSTOM RULES ── -->
         <div class="page" id="page-rules">
           <div class="page-hdr">
@@ -1666,8 +1773,20 @@
           </div>
           <div class="card">
             <div class="card-title">LLM Providers & Preferred Models</div>
-            <p style="font-size:12px;color:var(--text2);margin-bottom:14px">Set API credentials and select preferred
-              models for each AI provider.</p>
+            <p style="font-size:12px;color:var(--text2);margin-bottom:14px">Set API credentials, select models, and
+              choose the default provider for AI analysis.</p>
+
+            <div class="form-row" style="margin-bottom:14px">
+              <div class="form-group" style="margin-bottom:0"><label>Default AI Provider</label>
+                <select id="cfgActiveProvider">
+                  <option value="anthropic">Anthropic (Claude)</option>
+                  <option value="openai">OpenAI (GPT)</option>
+                  <option value="openrouter">OpenRouter</option>
+                </select>
+              </div>
+              <div style="align-self:end;font-size:11px;color:var(--text3);padding-bottom:6px">This provider will be
+                used in the Review Documents page</div>
+            </div>
 
             <div style="display:flex; flex-direction:column; gap:14px; margin-bottom:14px">
               <div class="form-row" style="align-items:end">
@@ -1715,6 +1834,26 @@
               <div><code>isps_office</code> / <code>office1234</code> — ISPS Office (review &amp; analyse)</div>
               <div><code>agent_mol</code> / <code>agent1234</code> — MOL Logistics Agent</div>
               <div><code>agent_windsor</code> / <code>agent1234</code> — Windsor Reef Agent</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── LLM CALL LOGS ── -->
+        <div class="page" id="page-llmlogs">
+          <div class="page-hdr">
+            <div>
+              <h1>LLM Call Logs</h1>
+              <p>View all AI analysis requests and responses for debugging</p>
+            </div>
+            <button class="btn btn-secondary" onclick="loadLLMLogs()">↻ Refresh</button>
+          </div>
+          <div class="card">
+            <div class="card-title">Recent LLM Calls</div>
+            <div id="llmLogsList">
+              <div class="empty-state">
+                <div class="emo">📡</div>
+                <p>No LLM calls recorded yet.</p>
+              </div>
             </div>
           </div>
         </div>
@@ -1785,9 +1924,24 @@
       document.getElementById('topbarName').textContent = currentUser.full_name || currentUser.username;
       document.getElementById('topbarRole').textContent = currentUser.role.replace('_', ' ');
 
+      // Reset all nav groups
+      document.getElementById('navAgent').style.display = 'none';
+      document.getElementById('navISPS').style.display = 'none';
+      document.getElementById('navOfficer').style.display = 'none';
+
       const role = currentUser.role;
-      if (role === 'agent') document.getElementById('navAgent').style.display = 'block';
-      if (role === 'isps_office') document.getElementById('navISPS').style.display = 'block';
+
+      // Agent: only sees Dashboard, Vessel Calls, Submit Documents, Settings
+      if (role === 'agent') {
+        document.getElementById('navAgent').style.display = 'block';
+      }
+
+      // ISPS Office: Dashboard, Vessel Calls, Review Documents
+      if (role === 'isps_office') {
+        document.getElementById('navISPS').style.display = 'block';
+      }
+
+      // ISPS Officer: everything
       if (role === 'isps_officer') {
         document.getElementById('navISPS').style.display = 'block';
         document.getElementById('navOfficer').style.display = 'block';
@@ -1796,7 +1950,56 @@
       loadDashboard();
       loadVessels();
       if (role === 'isps_office' || role === 'isps_officer') loadReviewList();
-      if (role === 'isps_officer') { loadNobjList(); loadRules(); loadConfig(); loadConfigModels(); }
+      if (role === 'isps_officer') { loadNobjList(); loadRules(); loadConfig(); loadConfigModels(); loadLLMLogs(); }
+      if (role === 'agent') loadAgentSettings();
+    }
+
+    // ── Agent Settings ──────────────────────────────────────────────────────────
+    function loadAgentSettings() {
+      document.getElementById('settings_name').value = currentUser.full_name || '';
+      document.getElementById('settings_email').value = currentUser.email || '';
+      document.getElementById('settings_phone').value = currentUser.phone || '';
+      document.getElementById('settings_company').value = currentUser.company || '';
+    }
+
+    async function saveAgentSettings() {
+      const name = document.getElementById('settings_name').value.trim();
+      const email = document.getElementById('settings_email').value.trim();
+      const phone = document.getElementById('settings_phone').value.trim();
+      const company = document.getElementById('settings_company').value.trim();
+
+      if (!name || !email) {
+        toast('Name and email are required', 'err');
+        return;
+      }
+
+      try {
+        await api('PATCH', '/api/auth/settings', {
+          full_name: name,
+          email: email,
+          phone: phone,
+          company: company
+        });
+
+        // Update currentUser
+        currentUser.full_name = name;
+        currentUser.email = email;
+        currentUser.phone = phone;
+        currentUser.company = company;
+
+        // Update topbar
+        document.getElementById('topbarName').textContent = name;
+
+        document.getElementById('settingsStatus').textContent = '✓ Settings saved';
+        document.getElementById('settingsStatus').style.color = 'var(--pass)';
+        document.getElementById('settingsStatus').style.display = 'block';
+        toast('Settings saved', 'ok');
+      } catch (e) {
+        document.getElementById('settingsStatus').textContent = '❌ ' + e.message;
+        document.getElementById('settingsStatus').style.color = 'var(--fail)';
+        document.getElementById('settingsStatus').style.display = 'block';
+        toast(e.message, 'err');
+      }
     }
 
     // ── Navigation ────────────────────────────────────────────────────────────────
@@ -1805,6 +2008,24 @@
       document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
       document.getElementById('page-' + id).classList.add('active');
       document.querySelectorAll(`.nav-item[data-page="${id}"]`).forEach(n => n.classList.add('active'));
+
+      // Auto-fill agent settings when showing submit page
+      if (id === 'submit' && currentUser.role === 'agent') {
+        autoFillAgentSettings();
+      }
+    }
+
+    function autoFillAgentSettings() {
+      // Only fill if fields are empty (don't override existing edits)
+      if (!document.getElementById('s_agent').value && currentUser.full_name) {
+        document.getElementById('s_agent').value = currentUser.full_name;
+      }
+      if (!document.getElementById('s_agentEmail').value && currentUser.email) {
+        document.getElementById('s_agentEmail').value = currentUser.email;
+      }
+      if (!document.getElementById('s_company').value && currentUser.company) {
+        document.getElementById('s_company').value = currentUser.company;
+      }
     }
 
     // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -1848,7 +2069,8 @@
       if (!vessels.length) return '<div class="empty-state" style="padding:32px"><div class="emo">🚢</div><p>No vessel calls found.</p></div>';
       const rows = vessels.map(v => `
     <tr onclick="openVessel(${v.id})">
-      <td><strong>${v.imo_number ? '(' + v.imo_number + ') ' : ''}${v.vessel_name}</strong><br><span style="font-size:11px;color:var(--text3);font-family:var(--mono)">${v.imo_number || '—'}</span></td>
+      <td><strong>${v.vessel_name}</strong></td>
+      <td><span style="font-size:11px;font-family:var(--mono)">${v.imo_number || '—'}</span></td>
       ${compact ? '' : `<td>${v.flag_state || '—'}</td><td>${v.vessel_type || '—'}</td>`}
       <td>${v.expected_arrival ? v.expected_arrival.substring(0, 10) : '—'}</td>
       <td>${statusPill(v.status)}</td>
@@ -1856,6 +2078,7 @@
     </tr>`).join('');
       return `<table><thead><tr>
     <th>Vessel</th>
+    <th>IMO Number</th>
     ${compact ? '' : '<th>Flag</th><th>Type</th>'}
     <th>ETA</th><th>Status</th><th>Voyage Ref</th>
   </tr></thead><tbody>${rows}</tbody></table>`;
@@ -1916,15 +2139,15 @@
         });
 
         const callId = callData.call_id;
-        
+
         // Collect all documents to upload: pendingDocs (individual slots) + bulkFileMap (bulk uploads)
         const allDocs = [];
-        
+
         // Add pending docs from individual slots
         for (const [dt, f] of Object.entries(pendingDocs)) {
           allDocs.push({ doc_type: dt, filename: f.filename, b64: f.b64 });
         }
-        
+
         // Add docs from bulkFileMap
         for (const entry of bulkFileMap) {
           if (entry.docType !== 'other') {
@@ -1936,7 +2159,7 @@
             allDocs.push({ doc_type: entry.docType, filename: entry.file.name, b64 });
           }
         }
-        
+
         if (allDocs.length > 0) {
           status.innerHTML = `<span class="spinner"></span> Running local OCR on ${allDocs.length} documents…`;
           await api('POST', `/api/vessels/${callId}/documents`, { docs: allDocs });
@@ -1982,15 +2205,39 @@
     async function loadReviewList() {
       try {
         const vessels = await api('GET', '/api/vessels');
-        const relevant = vessels.filter(v => !['pending', 'no_objection_issued', 'rejected'].includes(v.status));
+        // Show vessels that need review action - includes pending (documents may have been added),
+        // documents_submitted, under_review, discrepancies_raised, documents_corrected, cleared
+        const relevant = vessels.filter(v =>
+          !['no_objection_issued', 'rejected'].includes(v.status)
+        );
+        
         const list = document.getElementById('reviewVesselList');
         if (!relevant.length) { list.innerHTML = '<div class="empty-state"><div class="emo">✅</div><p>No vessels pending review.</p></div>'; return; }
-        list.innerHTML = relevant.map(v => `
-      <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="openReviewById(${v.id})">
-        <div style="flex:1"><strong style="font-size:14px">${v.imo_number ? '(' + v.imo_number + ') ' : ''}${v.vessel_name}</strong> <span style="font-size:11px;color:var(--text3);font-family:var(--mono)">${v.imo_number || ''}</span><br>
-        <span style="font-size:12px;color:var(--text2)">ETA: ${v.expected_arrival || '—'} · ${v.voyage_ref}</span></div>
-        ${statusPill(v.status)}
-      </div>`).join('');
+
+        const submitted = relevant.filter(v => ['documents_submitted', 'documents_corrected', 'under_review'].includes(v.status));
+        const discrepancies = relevant.filter(v => v.status === 'discrepancies_raised');
+        const cleared = relevant.filter(v => v.status === 'cleared');
+        const pending = relevant.filter(v => v.status === 'pending');
+
+        function renderGroup(title, arr) {
+          if (!arr.length) return '';
+          return `
+            <div style="margin-top: 16px; margin-bottom: 4px; font-weight: 600; font-size: 13px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em;">${title} (${arr.length})</div>
+            <div style="background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px;">
+            ` + arr.map((v, idx) => `
+            <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;${idx < arr.length - 1 ? 'border-bottom:1px solid var(--border);' : ''}cursor:pointer" onclick="openReviewById(${v.id})" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='transparent'">
+              <div style="flex:1"><strong style="font-size:14px">${v.vessel_name}</strong> <span style="font-size:11px;color:var(--text3);font-family:var(--mono);margin-left:6px">${v.imo_number ? 'IMO: ' + v.imo_number : ''}</span><br>
+              <span style="font-size:12px;color:var(--text2)">ETA: ${v.expected_arrival || '—'} · ${v.voyage_ref}</span></div>
+              ${statusPill(v.status)}
+            </div>`).join('') + `</div>`;
+        }
+
+        list.innerHTML = 
+          renderGroup('Submitted for Review', submitted) + 
+          renderGroup('Discrepancies Raised', discrepancies) + 
+          renderGroup('Cleared', cleared) + 
+          renderGroup('Pending Documents', pending);
+
       } catch (e) { }
     }
 
@@ -2005,19 +2252,35 @@
     function openReviewDetail(d) {
       document.getElementById('reviewVesselPicker').style.display = 'none';
       document.getElementById('reviewDetail').style.display = 'block';
+      // Load the active provider badge
+      api('GET', '/api/config/active-provider').then(cfg => {
+        const badge = document.getElementById('reviewProviderBadge');
+        const labels = { anthropic: 'Claude', openai: 'GPT', openrouter: 'OpenRouter' };
+        badge.textContent = 'AI: ' + (labels[cfg.provider] || cfg.provider) + ' · ' + (cfg.model || '');
+      }).catch(() => {
+        document.getElementById('reviewProviderBadge').textContent = 'AI provider not configured';
+      });
       const v = d.vessel;
       document.getElementById('reviewVesselInfo').innerHTML = `
     <div class="card">
-      <div class="vessel-name">${v.imo_number ? '(' + v.imo_number + ') ' : ''}MV ${v.vessel_name}</div>
+      <div class="vessel-name">MV ${v.vessel_name}</div>
       <div class="vessel-sub">${v.imo_number || ''} · ${v.flag_state || ''} flag · ${v.vessel_type || ''} · Ref: ${v.voyage_ref}</div>
-      <div class="info-grid">
-        <div class="info-field"><label>Master</label><span>${v.master_name || '—'}</span></div>
-        <div class="info-field"><label>ETA</label><span>${v.expected_arrival || '—'}</span></div>
-        <div class="info-field"><label>Departure</label><span>${v.departure || '—'}</span></div>
-        <div class="info-field"><label>Purpose</label><span>${v.purpose || '—'}</span></div>
-        <div class="info-field"><label>Agent</label><span>${v.agent_name || '—'}</span></div>
-        <div class="info-field"><label>Status</label><span>${statusPill(v.status)}</span></div>
-      </div>
+      <table class="bulk-map-table" style="margin-top: 12px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;">
+        <tbody>
+          <tr>
+            <th style="width: 25%; background: var(--surface2)">Master</th><td style="width: 25%">${v.master_name || '—'}</td>
+            <th style="width: 25%; background: var(--surface2)">Agent</th><td style="width: 25%">${v.agent_name || '—'}</td>
+          </tr>
+          <tr>
+            <th style="background: var(--surface2)">ETA</th><td>${v.expected_arrival || '—'}</td>
+            <th style="background: var(--surface2)">Departure</th><td>${v.departure || '—'}</td>
+          </tr>
+          <tr>
+            <th style="background: var(--surface2)">Purpose</th><td>${v.purpose || '—'}</td>
+            <th style="background: var(--surface2)">Status</th><td>${statusPill(v.status)}</td>
+          </tr>
+        </tbody>
+      </table>
       ${v.latitude && v.longitude ? `
       <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:16px">
         <div style="display:flex;align-items:center;margin-bottom:6px">
@@ -2048,34 +2311,23 @@
       const docs = d.documents || {};
       const docTypes = ['pans', 'issc', 'csr', 'dos', 'crew_list', 'armed_guards', 'isps_checklist', 'pi_certificate', 'hull_machinery', 'fal6', 'fal7', 'ship_particulars'];
       const docLabels = { pans: 'PANS', issc: 'ISSC', csr: 'CSR', dos: 'Declaration of Security', crew_list: 'Crew List (FAL5)', armed_guards: 'Armed Guards', isps_checklist: 'ISPS Checklist', pi_certificate: 'P&I Certificate', hull_machinery: 'Hull & Machinery', fal6: 'Passenger List (FAL6)', fal7: 'Dangerous Goods (FAL7)', ship_particulars: 'Ship Particulars' };
-      
-      // Helper to get thumbnail URL
-      function getThumbUrl(path) {
-        if (!path) return null;
-        const filename = path.split(/[/\\]/).pop();
-        return `/api/documents/${filename}/thumbnail`;
-      }
-      
+
       const docRows = docTypes.map(dt => {
         const received = docs[`doc_${dt}_received`];
         const disc = docs[`doc_${dt}_discrepancy`];
         const detail = docs[`doc_${dt}_disc_detail`] || '';
         const corrective = docs[`doc_${dt}_corrective`] || '';
         const docPath = docs[`doc_${dt}_path`] || '';
-        const thumbUrl = getThumbUrl(docPath);
-        
+
         if (!received) return `<div class="doc-review-row"><div class="doc-review-hdr"><div class="doc-type-label">${docLabels[dt] || dt}</div><span class="disc-status" style="background:#eee;color:#999">Not received</span></div></div>`;
         return `<div class="doc-review-row">
-      <div class="doc-review-hdr">
+      <div class="doc-review-hdr" style="margin-bottom: ${detail || corrective ? '8px' : '0'};">
         <div class="doc-type-label">${docLabels[dt] || dt}</div>
         <span class="disc-status ${disc ? 'ds-issue' : 'ds-ok'}">${disc ? '⚠ Issue' : '✓ OK'}</span>
       </div>
-      <div style="display:flex;gap:12px;align-items:flex-start">
-        ${thumbUrl ? `<img src="${thumbUrl}" onload="this.style.opacity=1" onerror="this.style.display='none'" style="width:80px;height:auto;border:1px solid var(--border);border-radius:4px;opacity:0;transition:opacity 0.3s" alt="Thumbnail">` : '<div style="width:80px;height:100px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text3)">No preview</div>'}
-        <div style="flex:1">
-          ${detail ? `<div style="font-size:12px;color:var(--fail);margin-bottom:6px">📌 ${detail}</div>` : ''}
-          ${corrective ? `<div style="font-size:12px;color:var(--pass)">✔ Corrective: ${corrective}</div>` : ''}
-        </div>
+      <div>
+        ${detail ? `<div style="font-size:12px;color:var(--fail);margin-bottom:6px">📌 ${detail}</div>` : ''}
+        ${corrective ? `<div style="font-size:12px;color:var(--pass)">✔ Corrective: ${corrective}</div>` : ''}
       </div>
     </div>`;
       }).join('');
@@ -2121,14 +2373,14 @@
     async function runAnalysis() {
       const btn = document.getElementById('btnAnalyse');
       const spinner = document.getElementById('analyseSpinner');
-      const provider = document.getElementById('llmProvider').value;
       btn.disabled = true;
       spinner.style.display = 'inline-block';
       try {
+        const cfg = await api('GET', '/api/config/active-provider');
+        const provider = cfg.provider || 'anthropic';
         const data = await api('POST', `/api/vessels/${currentCallId}/analyse`, { provider });
         renderComplianceResults(data.result, 'reviewCompliance');
         toast('Analysis complete — overall: ' + data.overall, data.overall === 'pass' ? 'ok' : 'warn');
-        // Reload to pick up updated discrepancy fields
         const d = await api('GET', `/api/vessels/${currentCallId}`);
         openReviewDetail(d);
       } catch (e) {
@@ -2213,12 +2465,28 @@
         const relevant = vessels.filter(v => ['cleared', 'no_objection_issued', 'discrepancies_raised'].includes(v.status));
         const list = document.getElementById('nobjVesselList');
         if (!relevant.length) { list.innerHTML = '<div class="empty-state"><div class="emo">📭</div><p>No vessels ready for no-objection.</p></div>'; return; }
-        list.innerHTML = relevant.map(v => `
-      <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="openNobjById(${v.id})">
-        <div style="flex:1"><strong>${v.imo_number ? '(' + v.imo_number + ') ' : ''}${v.vessel_name}</strong> <span style="font-size:11px;color:var(--text3);font-family:var(--mono)">${v.imo_number || ''}</span><br>
-        <span style="font-size:12px;color:var(--text2)">ETA: ${v.expected_arrival || '—'} · ${v.voyage_ref}</span></div>
-        ${statusPill(v.status)}
-      </div>`).join('');
+
+        const cleared = relevant.filter(v => v.status === 'cleared');
+        const nobj = relevant.filter(v => v.status === 'no_objection_issued');
+        const discrepancies = relevant.filter(v => v.status === 'discrepancies_raised');
+
+        function renderGroup(title, arr) {
+          if (!arr.length) return '';
+          return `
+            <div style="margin-top: 16px; margin-bottom: 4px; font-weight: 600; font-size: 13px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em;">${title} (${arr.length})</div>
+            <div style="background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px;">
+            ` + arr.map((v, idx) => `
+            <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;${idx < arr.length - 1 ? 'border-bottom:1px solid var(--border);' : ''}cursor:pointer" onclick="openNobjById(${v.id})" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='transparent'">
+              <div style="flex:1"><strong style="font-size:14px">${v.vessel_name}</strong> <span style="font-size:11px;color:var(--text3);font-family:var(--mono);margin-left:6px">${v.imo_number ? 'IMO: ' + v.imo_number : ''}</span><br>
+              <span style="font-size:12px;color:var(--text2)">ETA: ${v.expected_arrival || '—'} · ${v.voyage_ref}</span></div>
+              ${statusPill(v.status)}
+            </div>`).join('') + `</div>`;
+        }
+
+        list.innerHTML = 
+          renderGroup('Cleared for No Objection', cleared) + 
+          renderGroup('No Objection Issued', nobj) + 
+          renderGroup('Discrepancies Raised', discrepancies);
       } catch (e) { }
     }
 
@@ -2236,7 +2504,7 @@
       const v = d.vessel;
       document.getElementById('nobjVesselInfo').innerHTML = `
     <div class="card" style="margin-bottom:16px">
-      <div class="vessel-name">${v.imo_number ? '(' + v.imo_number + ') ' : ''}MV ${v.vessel_name}</div>
+      <div class="vessel-name">MV ${v.vessel_name}</div>
       <div class="vessel-sub">${v.imo_number || ''} · ${v.flag_state || ''} · ${v.voyage_ref}</div>
       <div class="info-grid">
         <div class="info-field"><label>ETA</label><span>${v.expected_arrival || '—'}</span></div>
@@ -2367,6 +2635,7 @@
         if (cfg.ANTHROPIC_API_KEY) document.getElementById('cfgAnthropicKey').placeholder = cfg.ANTHROPIC_API_KEY;
         if (cfg.OPENAI_API_KEY) document.getElementById('cfgOpenaiKey').placeholder = cfg.OPENAI_API_KEY;
         if (cfg.OPENROUTER_API_KEY) document.getElementById('cfgOpenrouterKey').placeholder = cfg.OPENROUTER_API_KEY;
+        if (cfg.ACTIVE_PROVIDER) document.getElementById('cfgActiveProvider').value = cfg.ACTIVE_PROVIDER;
       } catch { }
     }
 
@@ -2386,6 +2655,8 @@
       body.ANTHROPIC_MODEL = ma || "";
       body.OPENAI_MODEL = mo || "";
       body.OPENROUTER_MODEL = mr || "";
+      // Save active provider
+      body.ACTIVE_PROVIDER = document.getElementById('cfgActiveProvider').value;
       // aisstream key
       if (ast) body.AISTREAM_API_KEY = ast;
       try { await api('POST', '/api/config', body); toast('Configuration saved', 'ok'); } catch (e) { toast(e.message, 'err'); }
@@ -2415,7 +2686,64 @@
         if (cfg.OPENAI_API_KEY) document.getElementById('cfgOpenaiKey').placeholder = cfg.OPENAI_API_KEY;
         if (cfg.OPENROUTER_API_KEY) document.getElementById('cfgOpenrouterKey').placeholder = cfg.OPENROUTER_API_KEY;
         if (cfg.AISTREAM_API_KEY) document.getElementById('cfgAisstreamKey').placeholder = cfg.AISTREAM_API_KEY;
+        if (cfg.ACTIVE_PROVIDER) document.getElementById('cfgActiveProvider').value = cfg.ACTIVE_PROVIDER;
       } catch (e) { console.error('loadConfigModels error', e); }
+    }
+
+    // ── LLM Call Logs ─────────────────────────────────────────────────────────────
+    async function loadLLMLogs() {
+      try {
+        const logs = await api('GET', '/api/llm-logs');
+        const list = document.getElementById('llmLogsList');
+        if (!logs.length) {
+          list.innerHTML = '<div class="empty-state"><div class="emo">📡</div><p>No LLM calls recorded yet.</p></div>';
+          return;
+        }
+        const labels = { anthropic: 'Claude', openai: 'GPT', openrouter: 'OpenRouter' };
+        const statusHtml = s => {
+          if (s === 'success') return '<span style="color:var(--pass)">● Success</span>';
+          if (s === 'parse_error') return '<span style="color:var(--warn)">● Parse Error</span>';
+          return '<span style="color:var(--fail)">● Error</span>';
+        };
+        list.innerHTML = logs.map(l => `
+      <div class="llm-log-row" onclick="toggleLLMLog(this)">
+        <div class="llm-log-hdr">
+          <span style="font-size:11px;color:var(--text3);font-family:var(--mono);min-width:140px">${l.created_at || ''}</span>
+          <strong style="flex:1;font-size:13px">${l.vessel_name || '—'}</strong>
+          <span style="font-size:11px;color:var(--text2);min-width:70px">${labels[l.provider] || l.provider}</span>
+          <span style="font-size:10px;color:var(--text3);font-family:var(--mono);min-width:80px">${l.model || ''}</span>
+          <span style="min-width:80px">${statusHtml(l.status)}</span>
+          <span style="font-size:11px;color:var(--text3);font-family:var(--mono);min-width:60px">${l.duration_ms ? (l.duration_ms + 'ms') : '—'}</span>
+          <span style="font-size:10px;color:var(--text3)">${l.user_name || ''}</span>
+          <span style="font-size:16px;color:var(--text3);margin-left:auto">▸</span>
+        </div>
+        <div class="llm-log-body" style="display:none">
+          ${l.error ? `<div class="llm-log-section error"><strong>Error:</strong> ${l.error}</div>` : ''}
+          <div class="llm-log-section"><strong>Prompt:</strong><pre>${escHtml(l.prompt || '(truncated)')}</pre></div>
+          <div class="llm-log-section"><strong>Response:</strong><pre>${escHtml(l.response || '(empty)')}</pre></div>
+          ${l.status === 'parse_error' ? `<div class="llm-log-section warn"><strong>⚠ The LLM returned invalid JSON.</strong> Check the raw response above for formatting issues.</div>` : ''}
+        </div>
+      </div>`).join('');
+      } catch (e) {
+        document.getElementById('llmLogsList').innerHTML = '<div class="empty-state"><div class="emo">❌</div><p>Failed to load logs: ' + e.message + '</p></div>';
+      }
+    }
+
+    function toggleLLMLog(el) {
+      const body = el.querySelector('.llm-log-body');
+      const arrow = el.querySelector('.llm-log-hdr span:last-child');
+      if (body.style.display === 'none') {
+        body.style.display = 'block';
+        if (arrow) arrow.textContent = '▾';
+      } else {
+        body.style.display = 'none';
+        if (arrow) arrow.textContent = '▸';
+      }
+    }
+
+    function escHtml(s) {
+      if (!s) return '';
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
     // Lookup IMO via backend and populate submit form + map
@@ -2481,7 +2809,7 @@
       bulkFileMap = [];
       const tbody = document.getElementById('bulkMapBody');
       tbody.innerHTML = '';
-      
+
       // Process files - handle ZIP archives
       const processFile = async (file, indexOffset) => {
         if (file.name.toLowerCase().endsWith('.zip')) {
@@ -2496,7 +2824,7 @@
         }
         return [{ file, originalZip: null, zipIndex: indexOffset }];
       };
-      
+
       // Process all files including ZIP extraction
       (async () => {
         const allFiles = [];
@@ -2506,7 +2834,7 @@
           allFiles.push(...extracted);
           idx += extracted.length;
         }
-        
+
         allFiles.forEach((entry, i) => {
           const file = entry.file;
           const fromZip = entry.originalZip;
@@ -2532,7 +2860,7 @@
         document.getElementById('bulkPreviewSection').classList.add('show');
       })();
     }
-    
+
     async function extractZipFiles(arrayBuffer, zipName) {
       const files = [];
       try {
