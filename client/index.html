@@ -1873,13 +1873,27 @@
 
     // ── API helper ────────────────────────────────────────────────────────────────
     async function api(method, path, body) {
+      const token = authToken || localStorage.getItem('isps_token');
       const opts = {
         method,
         headers: { 'Content-Type': 'application/json' }
       };
-      if (authToken) opts.headers['Authorization'] = 'Bearer ' + authToken;
+      if (token) {
+        opts.headers['Authorization'] = 'Bearer ' + token;
+        if (!authToken) authToken = token; // Keep memory in sync
+      } else {
+        console.warn(`[API] Missing JWT token for request to ${path}`);
+      }
+      
       if (body !== undefined) opts.body = JSON.stringify(body);
       const r = await fetch(API + path, opts);
+      
+      if (r.status === 401 && path !== '/api/auth/login' && path !== '/api/auth/me') {
+         toast('Session expired or invalid. Please log in again.', 'err');
+         doLogout();
+         throw new Error('Unauthorized');
+      }
+      
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || r.statusText);
       return data;
@@ -2069,7 +2083,7 @@
       if (!vessels.length) return '<div class="empty-state" style="padding:32px"><div class="emo">🚢</div><p>No vessel calls found.</p></div>';
       const rows = vessels.map(v => `
     <tr onclick="openVessel(${v.id})">
-      <td><strong>${v.vessel_name}</strong></td>
+      <td><strong>${v.imo_number ? 'IMO ' + v.imo_number + ' — ' : ''}${v.vessel_name}</strong></td>
       <td><span style="font-size:11px;font-family:var(--mono)">${v.imo_number || '—'}</span></td>
       ${compact ? '' : `<td>${v.flag_state || '—'}</td><td>${v.vessel_type || '—'}</td>`}
       <td>${v.expected_arrival ? v.expected_arrival.substring(0, 10) : '—'}</td>
@@ -2226,7 +2240,7 @@
             <div style="background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px;">
             ` + arr.map((v, idx) => `
             <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;${idx < arr.length - 1 ? 'border-bottom:1px solid var(--border);' : ''}cursor:pointer" onclick="openReviewById(${v.id})" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='transparent'">
-              <div style="flex:1"><strong style="font-size:14px">${v.vessel_name}</strong> <span style="font-size:11px;color:var(--text3);font-family:var(--mono);margin-left:6px">${v.imo_number ? 'IMO: ' + v.imo_number : ''}</span><br>
+              <div style="flex:1"><strong style="font-size:14px">${v.imo_number ? 'IMO ' + v.imo_number + ' — ' : ''}${v.vessel_name}</strong><br>
               <span style="font-size:12px;color:var(--text2)">ETA: ${v.expected_arrival || '—'} · ${v.voyage_ref}</span></div>
               ${statusPill(v.status)}
             </div>`).join('') + `</div>`;
@@ -2263,8 +2277,8 @@
       const v = d.vessel;
       document.getElementById('reviewVesselInfo').innerHTML = `
     <div class="card">
-      <div class="vessel-name">MV ${v.vessel_name}</div>
-      <div class="vessel-sub">${v.imo_number || ''} · ${v.flag_state || ''} flag · ${v.vessel_type || ''} · Ref: ${v.voyage_ref}</div>
+      <div class="vessel-name">${v.imo_number ? 'IMO ' + v.imo_number + ' — ' : ''}${v.vessel_name}</div>
+      <div class="vessel-sub">${v.flag_state || ''} flag · ${v.vessel_type || ''} · Ref: ${v.voyage_ref}</div>
       <table class="bulk-map-table" style="margin-top: 12px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;">
         <tbody>
           <tr>
@@ -2477,7 +2491,7 @@
             <div style="background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px;">
             ` + arr.map((v, idx) => `
             <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;${idx < arr.length - 1 ? 'border-bottom:1px solid var(--border);' : ''}cursor:pointer" onclick="openNobjById(${v.id})" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='transparent'">
-              <div style="flex:1"><strong style="font-size:14px">${v.vessel_name}</strong> <span style="font-size:11px;color:var(--text3);font-family:var(--mono);margin-left:6px">${v.imo_number ? 'IMO: ' + v.imo_number : ''}</span><br>
+              <div style="flex:1"><strong style="font-size:14px">${v.imo_number ? 'IMO ' + v.imo_number + ' — ' : ''}${v.vessel_name}</strong><br>
               <span style="font-size:12px;color:var(--text2)">ETA: ${v.expected_arrival || '—'} · ${v.voyage_ref}</span></div>
               ${statusPill(v.status)}
             </div>`).join('') + `</div>`;
@@ -2504,8 +2518,8 @@
       const v = d.vessel;
       document.getElementById('nobjVesselInfo').innerHTML = `
     <div class="card" style="margin-bottom:16px">
-      <div class="vessel-name">MV ${v.vessel_name}</div>
-      <div class="vessel-sub">${v.imo_number || ''} · ${v.flag_state || ''} · ${v.voyage_ref}</div>
+      <div class="vessel-name">${v.imo_number ? 'IMO ' + v.imo_number + ' — ' : ''}${v.vessel_name}</div>
+      <div class="vessel-sub">${v.flag_state || ''} · ${v.voyage_ref}</div>
       <div class="info-grid">
         <div class="info-field"><label>ETA</label><span>${v.expected_arrival || '—'}</span></div>
         <div class="info-field"><label>Purpose</label><span>${v.purpose || '—'}</span></div>

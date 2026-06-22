@@ -7,6 +7,7 @@ import sys
 import json
 import base64
 import subprocess
+processing_jobs = set()
 import uuid
 import zipfile
 import tempfile
@@ -422,6 +423,13 @@ def get_vessel(call_id):
     db.close()
     return jsonify(vessel=vessel, documents=docs, no_objection=nobj, activity=logs)
 
+@app.route("/api/vessels/<int:call_id>/status", methods=["GET"])
+@jwt_required()
+def vessel_status(call_id):
+    # Simple status endpoint; returns processing flag
+    processing = call_id in processing_jobs
+    return jsonify({"processing": processing})
+
 @app.route("/api/vessels/<int:call_id>/status", methods=["PATCH"])
 @roles_required("isps_officer","isps_office")
 def update_status(call_id):
@@ -761,6 +769,9 @@ def update_no_objection(call_id):
     uid = int(get_jwt_identity())
     data = request.json or {}
     db = get_db()
+    if call_id in processing_jobs:
+        return jsonify(error="Processing already in progress"), 429
+    processing_jobs.add(call_id)
     existing = db.execute("SELECT id FROM no_objections WHERE call_id=?", (call_id,)).fetchone()
     if existing:
         db.execute("""
