@@ -6,8 +6,10 @@ import os
 import sys
 import json
 import base64
-import subprocess
+import time
+import concurrent.futures
 processing_jobs = set()
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 import uuid
 import zipfile
 import tempfile
@@ -32,9 +34,12 @@ DB_PATH    = os.environ.get("DB_PATH", str(PROJECT_DIR / "uploads" / "isps_hbt.d
 UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", str(PROJECT_DIR / "uploads")))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "isps-hbt-secret-change-in-production-2024")
+MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 5 MB per file
 
-app = Flask(__name__, static_folder="../client", static_url_path="")
+import secrets
+JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
+
+app = Flask(__name__, static_folder="../client_vite/dist", static_url_path="")
 CORS(app, origins="*", supports_credentials=True)
 app.config["JWT_SECRET_KEY"] = JWT_SECRET
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=12)
@@ -73,19 +78,13 @@ def get_llm_model(provider):
         defaults = {
             "anthropic": "claude-haiku-4-5-20251001",
             "openai": "gpt-4o-mini",
-            "openrouter": "anthropic/claude-haiku-4-5"
+            "openrouter": "google/gemini-2.5-flash"
         }
         model = defaults.get(provider, "")
     return model
 
 def get_active_provider():
-    try:
-        if CONFIG_FILE.exists():
-            cfg = json.loads(CONFIG_FILE.read_text())
-            return cfg.get("ACTIVE_PROVIDER", "anthropic")
-    except:
-        pass
-    return "anthropic"
+    return os.environ.get("ACTIVE_PROVIDER", "anthropic")
 
 # ── Role decorator ────────────────────────────────────────────────────────────
 def roles_required(*roles):
@@ -100,23 +99,56 @@ def roles_required(*roles):
         return wrapper
     return decorator
 
-def run_text_extract_api(filepath: str) -> str:
-    url = os.environ.get("TEXT_EXTRACT_API_URL", "http://localhost:8000/api/v1/extract")
+def run_ocr(b64: str, filename: str) -> dict:
+    """Run local OCR on a base64-encoded document. Returns {text, method, pages, char_count}."""
     try:
-        # Use curl to avoid requests dependency issues
-        result = subprocess.run(
-            ["curl", "-s", "-X", "POST", url, "-F", f"file=@{filepath}"],
-            capture_output=True, text=True, timeout=120
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            try:
-                data = json.loads(result.stdout)
-                return data.get("text", "") or data.get("markdown", "") or result.stdout
-            except json.JSONDecodeError:
-                return result.stdout
+        from server.ocr_extract import extract_text
+    except ImportError:
+        from ocr_extract import extract_text
+    try:
+        return extract_text(b64, filename)
     except Exception as e:
-        print(f"Error calling text-extract-api via curl: {e}")
-    return ""
+        print(f"Error in local OCR: {e}")
+        return {"text": "", "method": "error", "pages": 0, "char_count": 0}
+
+def process_document(call_id: int, doc_type: str, filepath: str, b64: str, filename: str, job_id: str):
+    """Background worker: run OCR on a single document and update DB."""
+    try:
+        ocr_result = run_ocr(b64, filename)
+        ocr_text = ocr_result.get("text", "")
+        
+        # Extract structured fields using LLM
+        extracted_fields = ""
+        if ocr_text.strip():
+            extracted_fields = extract_structured_fields(doc_type, ocr_text)
+            
+        db = get_db()
+        db.execute(f"""
+            UPDATE vessel_documents
+            SET doc_{doc_type}_text=?,
+                doc_{doc_type}_fields=?,
+                doc_{doc_type}_ocr_done=1,
+                updated_at=datetime('now')
+            WHERE call_id=?
+        """, (ocr_text, extracted_fields, call_id))
+        db.commit()
+        db.close()
+    except Exception as e:
+        print(f"[BACKGROUND OCR ERROR] call_id={call_id} doc={doc_type}: {e}")
+    finally:
+        processing_jobs.discard(job_id)
+
+def run_text_extract_api(filepath: str) -> str:
+    """Fallback: run local OCR on a file path. Used when text wasn't stored at upload time."""
+    try:
+        with open(filepath, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        ext = Path(filepath).suffix
+        result = run_ocr(b64, f"file{ext}")
+        return result.get("text", "")
+    except Exception as e:
+        print(f"Error in local text extraction: {e}")
+        return ""
 
 # ── LLM call (multi-provider) ─────────────────────────────────────────────────
 def call_llm(prompt: str, system: str = "", provider: str = "anthropic") -> str:
@@ -167,9 +199,9 @@ def call_llm(prompt: str, system: str = "", provider: str = "anthropic") -> str:
 
     elif provider == "openrouter":
         api_key = os.environ.get("OPENROUTER_API_KEY", "")
-        model = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-haiku-4-5")
+        model = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
         if not model:
-            model = "anthropic/claude-haiku-4-5"
+            model = "google/gemini-2.5-flash"
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
         body = json.dumps({
@@ -186,6 +218,79 @@ def call_llm(prompt: str, system: str = "", provider: str = "anthropic") -> str:
             return data["choices"][0]["message"]["content"]
 
     return ""
+
+def parse_json_from_llm(raw_text: str) -> dict:
+    """Parses JSON from LLM response, handling markdown blocks and basic truncation/repair."""
+    clean = raw_text.strip()
+    if "```json" in clean:
+        clean = clean.split("```json", 1)[1]
+    elif "```" in clean:
+        clean = clean.split("```", 1)[1]
+    
+    if "```" in clean:
+        clean = clean.split("```", 1)[0]
+    
+    clean = clean.strip()
+    
+    try:
+        return json.loads(clean)
+    except json.JSONDecodeError as e:
+        try:
+            s = clean.index("{")
+            e2 = clean.rindex("}")
+            return json.loads(clean[s:e2+1])
+        except Exception:
+            raise e
+
+def get_schema_for_doc_type(doc_type: str) -> str:
+    """Read schema file for the given doc type if it exists."""
+    schema_dir = Path("G:/App_Development/isps/Schema for output")
+    mapping = {
+        "pans": "PANS_extraction_schema.json",
+        "isps_checklist": "schema_CHECK_LIST_ALL_VESSELS_HAMBANTOTA.json",
+        "armed_guards": "schema_DECLARATION_OF_ARMED_GUARDS_WEAPONS.json",
+        "dos": "schema_DECLARATION_OF_SECURITY.json",
+        "crew_list": "schema_FAL_FORM_5_crew_list.json"
+    }
+    fname = mapping.get(doc_type)
+    if fname:
+        p = schema_dir / fname
+        if p.exists():
+            try:
+                return p.read_text(encoding="utf-8")
+            except Exception as e:
+                print(f"Error reading schema file {p}: {e}")
+    return ""
+
+def extract_structured_fields(doc_type: str, ocr_text: str, provider: str = None) -> str:
+    """Use active LLM to extract structured fields according to schema."""
+    schema_json = get_schema_for_doc_type(doc_type)
+    if not schema_json or not ocr_text or not ocr_text.strip():
+        return ""
+    
+    if not provider:
+        provider = get_active_provider()
+        
+    system = (
+        "You are an expert data extraction assistant. "
+        "Extract structured information from the provided document text matching the JSON schema. "
+        "Return ONLY the valid JSON object matching the schema — no explanations, no markdown blocks."
+    )
+    prompt = (
+        "JSON Schema to match:\n"
+        + schema_json + "\n\n"
+        "Document Text:\n"
+        + ocr_text[:8000] + "\n\n"
+        "Return the extracted data as a JSON object matching the schema. "
+        "Return ONLY the JSON object. Do not include markdown code block formatting or any other text."
+    )
+    try:
+        raw = call_llm(prompt, system, provider)
+        parsed = parse_json_from_llm(raw)
+        return json.dumps(parsed)
+    except Exception as e:
+        print(f"Failed to extract structured fields for {doc_type}: {e}")
+        return ""
 
 # ── Build compliance prompt from extracted text ───────────────────────────────
 def build_compliance_prompt(texts: dict, custom_rules: list, vessel_name: str) -> tuple:
@@ -421,14 +526,60 @@ def get_vessel(call_id):
         (call_id,)
     ).fetchall())
     db.close()
-    return jsonify(vessel=vessel, documents=docs, no_objection=nobj, activity=logs)
+
+    # Build per-doc OCR/LLM status
+    doc_types = ["pans","issc","csr","dos","crew_list","armed_guards","isps_checklist",
+                 "pi_certificate","hull_machinery","fal6","fal7","ship_particulars","other"]
+    doc_status = {}
+    if docs:
+        for dt in doc_types:
+            path = docs.get(f"doc_{dt}_path")
+            ocr_done = docs.get(f"doc_{dt}_ocr_done", 0)
+            if path:
+                doc_status[dt] = {
+                    "ocr_done": bool(ocr_done),
+                    "received": bool(docs.get(f"doc_{dt}_received")),
+                    "has_discrepancy": bool(docs.get(f"doc_{dt}_discrepancy")),
+                    "char_count": len(docs.get(f"doc_{dt}_text") or "")
+                }
+            else:
+                doc_status[dt] = {"received": False}
+
+    return jsonify(vessel=vessel, documents=docs, no_objection=nobj, activity=logs, doc_status=doc_status)
 
 @app.route("/api/vessels/<int:call_id>/status", methods=["GET"])
 @jwt_required()
 def vessel_status(call_id):
-    # Simple status endpoint; returns processing flag
-    processing = call_id in processing_jobs
-    return jsonify({"processing": processing})
+    db = get_db()
+    doc_rec = row_to_dict(db.execute("SELECT * FROM vessel_documents WHERE call_id=?", (call_id,)).fetchone())
+    vessel = row_to_dict(db.execute("SELECT * FROM vessel_calls WHERE id=?", (call_id,)).fetchone())
+    db.close()
+
+    doc_types = ["pans","issc","csr","dos","crew_list","armed_guards","isps_checklist",
+                 "pi_certificate","hull_machinery","fal6","fal7","ship_particulars","other"]
+
+    per_doc = {}
+    for dt in doc_types:
+        path = doc_rec.get(f"doc_{dt}_path") if doc_rec else None
+        ocr_done = doc_rec.get(f"doc_{dt}_ocr_done", 0) if doc_rec else 0
+        ocr_text = doc_rec.get(f"doc_{dt}_text") if doc_rec else ""
+        has_jobs = any(job_id and f"ocr_{call_id}_{dt}" in str(job_id) for job_id in processing_jobs)
+        if path:
+            per_doc[dt] = {
+                "ocr_status": "done" if ocr_done else ("running" if has_jobs else "pending"),
+                "llm_status": "done" if doc_rec and doc_rec.get("llm_status") == "done" else "pending",
+                "char_count": len(ocr_text or ""),
+                "has_discrepancy": bool(doc_rec.get(f"doc_{dt}_discrepancy")) if doc_rec else False
+            }
+        else:
+            per_doc[dt] = {"ocr_status": "not_uploaded"}
+
+    overall = vessel["status"] if vessel else "unknown"
+    return jsonify({
+        "processing": bool(processing_jobs),
+        "status": overall,
+        "documents": per_doc
+    })
 
 @app.route("/api/vessels/<int:call_id>/status", methods=["PATCH"])
 @roles_required("isps_officer","isps_office")
@@ -482,14 +633,23 @@ def upload_documents(call_id):
         if not b64:
             continue
 
+        # Check file size before decoding
+        raw_bytes = base64.b64decode(b64)
+        if len(raw_bytes) > MAX_UPLOAD_SIZE:
+            return jsonify(error=f"File {filename} exceeds 5 MB limit"), 400
+
         # Save file to disk
         ext = Path(filename).suffix
         save_name = f"{call_id}_{doc_type}_{uuid.uuid4().hex[:8]}{ext}"
         save_path = UPLOAD_DIR / save_name
         with open(save_path, "wb") as f:
-            f.write(base64.b64decode(b64))
+            f.write(raw_bytes)
 
-        # Update DB columns
+        # Enqueue background OCR job
+        job_id = f"ocr_{call_id}_{doc_type}_{uuid.uuid4().hex[:4]}"
+        processing_jobs.add(job_id)
+
+        # Update DB columns immediately (file saved, OCR pending)
         safe_type = doc_type if doc_type in [
             "pans","issc","csr","dos","crew_list","armed_guards","isps_checklist",
             "pi_certificate","hull_machinery","fal6","fal7","ship_particulars","other"
@@ -499,11 +659,16 @@ def upload_documents(call_id):
             UPDATE vessel_documents
             SET doc_{safe_type}_path=?,
                 doc_{safe_type}_received=1,
+                doc_{safe_type}_ocr_done=0,
                 updated_at=datetime('now')
             WHERE call_id=?
         """, (str(save_path), call_id))
 
-        results[doc_type] = {"saved": save_name}
+        results[doc_type] = {"saved": save_name, "job_id": job_id}
+
+        # Submit OCR to background thread
+        b64_copy = base64.b64encode(raw_bytes).decode()
+        executor.submit(process_document, call_id, safe_type, str(save_path), b64_copy, filename, job_id)
 
     # Update vessel status
     db.execute("UPDATE vessel_calls SET status='documents_submitted',updated_at=datetime('now') WHERE id=?", (call_id,))
@@ -546,7 +711,8 @@ def analyse_vessel(call_id):
     pans_text = doc_rec.get("doc_pans_text") or ""
     if pans_path and not pans_text:
         pans_text = run_text_extract_api(pans_path)
-        db.execute("UPDATE vessel_documents SET doc_pans_text=? WHERE call_id=?", (pans_text, call_id))
+        pans_fields = extract_structured_fields("pans", pans_text, provider) if pans_text.strip() else ""
+        db.execute("UPDATE vessel_documents SET doc_pans_text=?, doc_pans_fields=? WHERE call_id=?", (pans_text, pans_fields, call_id))
         db.commit()
 
     # 2. Ask LLM what documents are required based on PANS
@@ -556,10 +722,8 @@ def analyse_vessel(call_id):
         req_system = "You are an assistant that extracts required document types from a Pre-Arrival Notification (PANS)."
         try:
             req_raw = call_llm(req_prompt, req_system, provider)
-            clean = req_raw.replace("```json","").replace("```","").strip()
-            s = clean.find("["); e2 = clean.rfind("]")
-            if s != -1 and e2 != -1:
-                parsed_reqs = json.loads(clean[s:e2+1])
+            parsed_reqs = parse_json_from_llm(req_raw)
+            if isinstance(parsed_reqs, list):
                 required_docs = [d for d in parsed_reqs if d in doc_types]
                 if "pans" not in required_docs:
                     required_docs.append("pans")
@@ -575,7 +739,8 @@ def analyse_vessel(call_id):
         text = doc_rec.get(f"doc_{dt}_text")
         if path and not text:
             text = run_text_extract_api(path)
-            db.execute(f"UPDATE vessel_documents SET doc_{dt}_text=? WHERE call_id=?", (text, call_id))
+            fields = extract_structured_fields(dt, text, provider) if text.strip() else ""
+            db.execute(f"UPDATE vessel_documents SET doc_{dt}_text=?, doc_{dt}_fields=? WHERE call_id=?", (text, fields, call_id))
             db.commit()
         if text and text.strip():
             texts[dt] = text
@@ -583,7 +748,6 @@ def analyse_vessel(call_id):
     system, prompt = build_compliance_prompt(texts, custom_rules, vessel["vessel_name"])
     model = get_llm_model(provider)
 
-    import time
     start_ms = int(time.time() * 1000)
     raw = ""
     llm_error = None
@@ -611,9 +775,7 @@ def analyse_vessel(call_id):
     # Parse JSON from LLM response
     parsed = None
     try:
-        clean = raw.replace("```json","").replace("```","").strip()
-        s = clean.index("{"); e2 = clean.rindex("}")
-        parsed = json.loads(clean[s:e2+1])
+        parsed = parse_json_from_llm(raw)
     except Exception:
         log_llm_call(db, call_id, uid, provider, model, prompt[:3000], raw[:5000], "LLM returned invalid JSON", duration_ms, "parse_error")
         db.commit()
@@ -850,45 +1012,32 @@ def delete_rule(rule_id):
     return jsonify(ok=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CONFIG (API keys — stored server-side only)
+# CONFIG (API keys — stored in environment variables only)
 # ═══════════════════════════════════════════════════════════════════════════════
-
-CONFIG_FILE = BASE_DIR / ".." / "config.json"
 
 @app.route("/api/config", methods=["GET"])
 @roles_required("isps_officer")
 def get_config():
-    try:
-        cfg = json.loads(CONFIG_FILE.read_text())
-        # Mask only API keys (keys ending with _KEY)
-        masked = {}
-        for k, v in cfg.items():
-            if k.upper().endswith("_KEY"):
-                masked[k] = ("*" * 8 + v[-4:]) if v else ""
-            else:
-                masked[k] = v
-        return jsonify(masked)
-    except:
-        return jsonify({})
+    keys = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+            "AISTREAM_API_KEY", "ANTHROPIC_MODEL", "OPENAI_MODEL",
+            "OPENROUTER_MODEL", "ACTIVE_PROVIDER"]
+    masked = {}
+    for k in keys:
+        v = os.environ.get(k, "")
+        if k.endswith("_KEY") and v:
+            masked[k] = ("*" * 8 + v[-4:]) if len(v) > 4 else ""
+        else:
+            masked[k] = v
+    return jsonify(masked)
 
 @app.route("/api/config", methods=["POST"])
 @roles_required("isps_officer")
 def save_config():
     data = request.json or {}
     try:
-        existing = {}
-        if CONFIG_FILE.exists():
-            existing = json.loads(CONFIG_FILE.read_text())
-        # Only update keys that are not masked
         for k, v in data.items():
             if v is not None and not str(v).startswith("*"):
-                existing[k] = v
-            elif v == "":
-                existing[k] = ""
-        CONFIG_FILE.write_text(json.dumps(existing, indent=2))
-        # Apply to env
-        for k, v in existing.items():
-            os.environ[k.upper()] = v
+                os.environ[k.upper()] = str(v)
         return jsonify(ok=True)
     except Exception as e:
         return jsonify(error=str(e)), 500
@@ -1069,13 +1218,7 @@ async def query_aisstream_for_imo(api_key, target_imo):
     return None
 
 def lookup_vessel_by_imo(target_imo):
-    config = {}
-    if CONFIG_FILE.exists():
-        try:
-            config = json.loads(CONFIG_FILE.read_text())
-        except:
-            pass
-    api_key = config.get("AISTREAM_API_KEY") or os.environ.get("AISTREAM_API_KEY")
+    api_key = os.environ.get("AISTREAM_API_KEY", "")
     if api_key:
         try:
             import asyncio
@@ -1142,16 +1285,9 @@ def fetch_openrouter_models(api_key):
 @app.route("/api/config/models", methods=["GET"])
 @roles_required("isps_officer")
 def get_config_models():
-    api_keys = {}
-    if CONFIG_FILE.exists():
-        try:
-            api_keys = json.loads(CONFIG_FILE.read_text())
-        except:
-            pass
-            
-    anthropic_key = api_keys.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
-    openai_key = api_keys.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
-    openrouter_key = api_keys.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
     
     anthropic_models = fetch_anthropic_models(anthropic_key)
     openai_models = fetch_openai_models(openai_key)
@@ -1181,13 +1317,7 @@ def lookup_imo(imo):
         return jsonify(error=str(e)), 500
 
 def load_config():
-    if CONFIG_FILE.exists():
-        try:
-            cfg = json.loads(CONFIG_FILE.read_text())
-            for k, v in cfg.items():
-                os.environ.setdefault(k.upper(), v)
-        except:
-            pass
+    pass
 
 def ensure_db():
     """Initialize database schema and seed users if the DB doesn't exist yet."""
@@ -1296,6 +1426,8 @@ def upload_zip_documents(call_id):
                         continue
                     
                     file_bytes = zf.read(zinfo)
+                    if len(file_bytes) > MAX_UPLOAD_SIZE:
+                        return jsonify(error=f"File {Path(zinfo).name} in ZIP exceeds 5 MB limit"), 400
                     file_b64 = base64.b64encode(file_bytes).decode()
                     extracted_files.append({
                         "filename": Path(zinfo).name,
@@ -1313,21 +1445,22 @@ def upload_zip_documents(call_id):
             save_path = UPLOAD_DIR / save_name
             with open(save_path, "wb") as f:
                 f.write(base64.b64decode(ef["b64"]))
-            
-            ocr_result = run_ocr(ef["b64"], ef["filename"])
-            text = ocr_result.get("text", "")
-            method = ocr_result.get("method", "unknown")
-            
+
+            job_id = f"ocr_{call_id}_{doc_type}_{uuid.uuid4().hex[:4]}"
+            processing_jobs.add(job_id)
+            b64_copy = ef["b64"]
+            executor.submit(process_document, call_id, doc_type, str(save_path), b64_copy, ef["filename"], job_id)
+
             db.execute(f"""
                 UPDATE vessel_documents
                 SET doc_{doc_type}_path=?,
-                    doc_{doc_type}_text=?,
                     doc_{doc_type}_received=1,
+                    doc_{doc_type}_ocr_done=0,
                     updated_at=datetime('now')
                 WHERE call_id=?
-            """, (str(save_path), text, call_id))
-            
-            results[ef["filename"]] = {"doc_type": doc_type, "method": method, "chars": len(text), "saved": save_name, "confidence": confidence}
+            """, (str(save_path), call_id))
+
+            results[ef["filename"]] = {"doc_type": doc_type, "saved": save_name, "job_id": job_id, "confidence": confidence}
         
         db.execute("UPDATE vessel_calls SET status='documents_submitted',updated_at=datetime('now') WHERE id=?", (call_id,))
         log_action(db, call_id, uid, "documents_uploaded_zip", json.dumps(list(results.keys())))
@@ -1344,7 +1477,7 @@ def upload_zip_documents(call_id):
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_static(path):
-    client_dir = BASE_DIR / ".." / "client"
+    client_dir = BASE_DIR / ".." / "client_vite" / "dist"
     if path and (client_dir / path).exists():
         return send_from_directory(str(client_dir), path)
     return send_from_directory(str(client_dir), "index.html")

@@ -1,71 +1,73 @@
-# Implementation Plan - AI Model Selection & aisstream.io Vessel Tracking
+# ISPS HBT Port Security System — Development Plan
 
-This plan outlines the changes required to allow PFSO configuration of LLM models (and dynamic listing of models available for each provider's API key), integrate the `aisstream.io` API for real-time vessel data lookup, auto-fill vessel details by IMO number, prepend the IMO number to the vessel name in all listings/views, and display the vessel's live position on an interactive map.
+## Stack
 
-## User Review Required
+| Layer | Technology |
+|-------|-----------|
+| **Backend** | Python Flask (monolithic, `server/app.py` ~1536 lines) |
+| **Frontend** | Vanilla JS + Vite (SPA, `client_vite/`) |
+| **Database** | SQLite (`uploads/isps_hbt.db`) |
+| **OCR** | Local Tesseract pipeline (`server/ocr_extract.py`) |
+| **LLM** | Multi-provider: Anthropic Claude / OpenAI GPT / OpenRouter |
+| **Auth** | JWT (`flask-jwt-extended`) |
+| **Hosting** | Docker -> Render (gunicorn) |
+| **Live tracking** | aisstream.io WebSocket API |
 
-> [!IMPORTANT]
-> - **API Key for aisstream.io**: A new configuration field `AISTREAM_API_KEY` will be added to the Configuration page. The user will need to sign up for a free key on [aisstream.io](https://aisstream.io/) and save it there.
-> - **Simulated Fallback**: If no key is entered or if the real API request fails/timeouts (standard AIS reports only broadcast every few minutes), the lookup will fall back to realistic mock vessel particulars and positions around Hambantota Port to ensure a working demonstration.
-
-## Proposed Changes
-
----
-
-### Backend Components
-
-#### [MODIFY] [server/app.py](file:///g:/App_Development/isps/v2/server/app.py)
-
-- **AI Model Selection**:
-  - Update `/api/config` endpoints to load, mask, and save the chosen models: `anthropic_model`, `openai_model`, `openrouter_model`.
-  - Add an endpoint `/api/config/models` that fetches available models for each configured key:
-    - **Anthropic**: Calls `https://api.anthropic.com/v1/models`
-    - **OpenAI**: Calls `https://api.openai.com/v1/models`
-    - **OpenRouter**: Calls `https://openrouter.ai/api/v1/models`
-  - Update `call_llm` to use the model selected in `config.json` (falling back to default models if none is selected).
-
-- **aisstream.io Vessel Data Lookup**:
-  - Add an endpoint `/api/vessels/lookup-imo/<imo>` that:
-    - Queries the `aisstream.io` WebSocket stream if `AISTREAM_API_KEY` is configured.
-    - Standardizes the response fields: `vessel_name`, `gross_tonnage`, `vessel_type`, `flag_state`, `latitude`, `longitude`.
-    - If `AISTREAM_API_KEY` is not present, or if the lookup times out (since AIS broadcasts are sparse), falls back to generating a realistic mock vessel data profile based on the IMO code.
-  - Store vessel coordinates (latitude/longitude) in the database for each vessel call so that the position is persisted and can be viewed later.
-  - Modify `isps_hbt.db` schema: update/add columns for `latitude` and `longitude` in the `vessel_calls` table.
-
-#### [MODIFY] [server/db.py](file:///g:/App_Development/isps/v2/server/db.py)
-- Ensure the database initialization script includes the `latitude` and `longitude` columns in the `vessel_calls` table.
+The app is a Port Security Compliance System for Hambantota International Port,
+Sri Lanka. It handles the full workflow: agents submit vessel docs -> OCR extracts
+text -> LLM checks ISPS compliance -> officer issues no-objection emails.
 
 ---
 
-### Frontend Components
+## Current Pain Points / Gaps
 
-#### [MODIFY] [client/index.html](file:///g:/App_Development/isps/v2/client/index.html)
+1. **Conflicting backends** — Root `package.json` points to `server/index.js`
+   (Node/Express), but the real backend is `server/app.py` (Python/Flask).
+2. **Old `client/` directory** vs `client_vite/` — legacy code to clean up.
+3. **Email sending is fake** — Uses `mailto:` links (opens local mail client).
+   No SMTP integration. Emails are only marked as "sent" in the DB.
+4. **API keys in plaintext** — `config.json` contains real-looking keys
+   committed to the repo.
+5. **No tests** — Zero test files found.
+6. **No structured logging** — Just `print()` statements everywhere.
+7. **SQLite won't scale** — No concurrency, no persistence guarantees.
+8. **Security** — `CORS(origins="*")`, weak default passwords, hardcoded JWT
+   secret fallback.
 
-- **Configuration Screen**:
-  - Add inputs/dropdowns for model selection for each provider.
-  - Add an "Aisstream.io API Key" password field under Configuration.
-  - Fetch and show the list of available models next to each API key.
+---
 
-- **Vessel Name IMO Prefix**:
-  - Update `vesselTableHTML`, `loadReviewList`, `openReviewDetail`, `loadNobjList`, and `openNobjDetail` to prepend `(IMO: <imo>)` (or standard `IMO <imo> — ` format) to the vessel name.
+## Phase 1 — Cleanup & Safety (1-2 days)
 
-- **Vessel Lookup by IMO**:
-  - Add a "Lookup IMO" button next to the `s_imo` field on the Submit page.
-  - Auto-trigger lookup if a 7-digit IMO number is typed and blurred.
-  - Auto-fill `s_name`, `s_gt`, `s_type`, `s_flag` on success.
+- [ ] Remove dead `server/index.js` and old `client/` directory
+- [ ] Rotate any exposed API keys immediately
+- [ ] Move secrets from `config.json` to `.env` / environment variables only
+- [ ] Set proper JWT secret in production
+- [ ] Remove `config.json` from version control (add to `.gitignore`)
 
-- **Interactive Map**:
-  - Add Leaflet.js dependencies (CSS + JS) in `<head>`.
-  - Add map container in Submit page, Review page, and No-Objection page.
-  - Display the vessel's current position as a marker on the map whenever coordinates are available.
+---
 
-## Verification Plan
+## Phase 2 — Foundation Hardening (3-5 days)
 
-### Automated Tests
-- Run `python server/db.py` to migrate/verify the schema.
-- Run `python server/app.py` and hit `/api/vessels/lookup-imo/9982990` with and without API keys.
+- [ ] Add tests (pytest for API, vitest for frontend)
+- [ ] Structured logging (replace `print()` with Python `logging` module)
+- [ ] Tighten CORS to specific origins
 
-### Manual Verification
-- Log in as `pfso_hbt`. Go to Configuration, save API keys, and test the model listing dropdown.
-- Log in as `agent_mol`. Create a new vessel call, enter an IMO number, verify that the details are auto-filled, and check the map rendering.
-- Log in as `isps_office` / `pfso_hbt`. Verify that the vessel call list, review screen, and no-objection screen prepend the IMO number to the vessel name and show the vessel's position on the map.
+---
+
+## Phase 3 — Production Readiness (1-2 weeks)
+
+- [ ] Migrate DB from SQLite to PostgreSQL / Supabase
+- [ ] File storage — move from local `uploads/` to S3-compatible storage
+- [ ] OCR improvement — implement dots.mocr (VLM sidecar) for better accuracy
+- [ ] CI/CD — add GitHub Actions for test + lint on PR
+
+---
+
+## Phase 4 — Polish (as needed)
+
+- [ ] Extract CSS from `index.html` into proper stylesheet
+- [ ] Add loading states / error boundaries on all pages
+- [ ] Paginate vessel lists
+- [ ] Add webhook or polling for document upload progress to agent
+- [ ] Role-based UI refinement
+- [ ] Session management (token refresh)

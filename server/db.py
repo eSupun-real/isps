@@ -101,6 +101,7 @@ def init_db():
         cols.append(f"doc_{dt}_corrective    TEXT")   # corrective action text
         cols.append(f"doc_{dt}_corrected_path TEXT")  # re-submitted corrected file
         cols.append(f"doc_{dt}_verified      INTEGER DEFAULT 0")  # 1=office verified
+        cols.append(f"doc_{dt}_ocr_done      INTEGER DEFAULT 0")  # 1=OCR complete
 
     c.execute(f"""
     CREATE TABLE IF NOT EXISTS vessel_documents (
@@ -173,6 +174,19 @@ def init_db():
         duration_ms INTEGER,
         created_at  TEXT DEFAULT (datetime('now'))
     )""")
+
+    # ── Migrate existing tables: add ocr_done columns if missing ────────────
+    doc_types_migrate = [
+        "pans", "issc", "csr", "dos", "crew_list",
+        "armed_guards", "isps_checklist",
+        "pi_certificate", "hull_machinery", "fal6", "fal7",
+        "ship_particulars", "other"
+    ]
+    for dt in doc_types_migrate:
+        try:
+            c.execute(f"ALTER TABLE vessel_documents ADD COLUMN doc_{dt}_ocr_done INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
 
     conn.commit()
 
